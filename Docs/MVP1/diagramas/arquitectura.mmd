@@ -1,0 +1,6 @@
+flowchart TD
+    UI["Flutter: pantallas y navegación"] --> APP["Reglas de aplicación actualmente dispersas"]
+    APP --> DB["sqflite / v370_workshop.db"]
+    APP -. "Separación futura propuesta" .-> REPO["Repositorios por módulo"]
+    REPO -.-> DB
+    REPO -. "MVP 2: sincronización" .-> API["API backend Raspberry Pi 5"]
