@@ -1,3 +1,4 @@
+import 'dart:async' show Timer;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -10,8 +11,11 @@ import 'package:image_picker/image_picker.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'orden_soc.dart';
+
 part 'workshop_finance.dart';
 part 'workshop_frp.dart';
+part 'workshop_inicio.dart';
 
 Future<void> _addFollowUpNotes(Database db) async {
   await db.execute('ALTER TABLE work_orders ADD COLUMN follow_up_notes TEXT');
@@ -186,6 +190,7 @@ class _WorkshopRecords extends StatefulWidget {
 
 class _WorkshopRecordsState extends State<_WorkshopRecords> {
   late Future<List<Map<String, Object?>>> _orders;
+  final _searchController = TextEditingController();
   String _searchText = '';
   String? _statusFilter;
   Future<List<Map<String, Object?>>> _loadRows() =>
@@ -217,27 +222,45 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
   }
 
   @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final isCustomers = widget.section == 'Clientes';
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: [
-          if (widget.section == 'Órdenes')
-            IconButton(
-              tooltip: 'Nueva orden',
-              onPressed: _startOrderFromList,
-              icon: const Icon(Icons.add),
+    // Encabezado SoC del listado de ordenes.
+    final page = Scaffold(
+      backgroundColor: isCustomers ? null : Colors.transparent,
+      appBar: !isCustomers
+          ? OrdenSocHeader(
+              title: const Text('Órdenes'),
+              showSectionMenu: false,
+              headerActions: const [],
+              actions: [
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: IconButton(
+                    tooltip: 'Nueva orden',
+                    onPressed: _startOrderFromList,
+                    icon: const Icon(Icons.add),
+                  ),
+                ),
+              ],
+            )
+          : AppBar(
+              title: Text(widget.title),
+              actions: [
+                if (isCustomers)
+                  IconButton(
+                    tooltip: 'Nuevo cliente',
+                    onPressed: _addCustomer,
+                    icon: const Icon(Icons.person_add_outlined),
+                  ),
+              ],
             ),
-          if (isCustomers)
-            IconButton(
-              tooltip: 'Nuevo cliente',
-              onPressed: _addCustomer,
-              icon: const Icon(Icons.person_add_outlined),
-            ),
-        ],
-      ),
       body: FutureBuilder<List<Map<String, Object?>>>(
         future: _orders,
         builder: (context, snapshot) {
@@ -279,33 +302,65 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
             );
           }
 
+          final search = TextField(
+            controller: _searchController,
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              border: isCustomers ? null : const OutlineInputBorder(),
+              isDense: !isCustomers,
+              labelText: isCustomers
+                  ? 'Buscar por nombre o teléfono'
+                  : 'Buscar órdenes',
+              hintText: isCustomers ? null : 'Código, cliente o equipo',
+            ),
+            onChanged: (value) =>
+                setState(() => _searchText = value.trim().toLowerCase()),
+          );
+
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              TextField(
-                decoration: InputDecoration(
-                  prefixIcon: const Icon(Icons.search),
-                  labelText: isCustomers
-                      ? 'Buscar por nombre o teléfono'
-                      : 'Buscar por código, cliente o equipo',
-                ),
-                onChanged: (value) =>
-                    setState(() => _searchText = value.trim().toLowerCase()),
-              ),
-              if (!isCustomers)
-                DropdownButton<String>(
-                  isExpanded: true,
-                  value: _statusFilter ?? 'Todos',
-                  items: [
-                    for (final status in [
-                      'Todos',
-                      ..._OrderDetailsState._statuses,
-                    ])
-                      DropdownMenuItem(value: status, child: Text(status)),
-                  ],
-                  onChanged: (value) => setState(
-                    () => _statusFilter = value == 'Todos' ? null : value,
-                  ),
+              if (isCustomers)
+                search
+              else
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final status = DropdownButtonFormField<String>(
+                      isExpanded: true,
+                      initialValue: _statusFilter ?? 'Todos',
+                      decoration: const InputDecoration(
+                        labelText: 'Estado',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: [
+                        for (final value in [
+                          'Todos',
+                          ..._OrderDetailsState._statuses,
+                        ])
+                          DropdownMenuItem(
+                            value: value,
+                            child: Text(value, overflow: TextOverflow.ellipsis),
+                          ),
+                      ],
+                      onChanged: (value) => setState(
+                        () => _statusFilter = value == 'Todos' ? null : value,
+                      ),
+                    );
+                    if (constraints.maxWidth < 320 ||
+                        MediaQuery.textScalerOf(context).scale(14) > 18) {
+                      return Column(
+                        children: [search, const SizedBox(height: 8), status],
+                      );
+                    }
+                    return Row(
+                      children: [
+                        Expanded(flex: 3, child: search),
+                        const SizedBox(width: 8),
+                        Expanded(flex: 2, child: status),
+                      ],
+                    );
+                  },
                 ),
               const SizedBox(height: 12),
               Text(
@@ -354,6 +409,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
         },
       ),
     );
+    return isCustomers ? page : OrdenSocBackdrop(child: page);
   }
 }
 
@@ -1151,103 +1207,125 @@ class _OrderDetailsState extends State<_OrderDetails> {
 
     return PopScope(
       canPop: !_saving,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text('Orden ${order['code']}'),
-          actions: [
-            IconButton(
-              tooltip: 'Eliminar orden',
-              onPressed: _saving
-                  ? null
-                  : () => _deleteWorkshopRecord(
-                      context,
-                      _DeleteTarget.order,
-                      order['code']!,
-                    ),
-              icon: const Icon(Icons.delete_outline),
-            ),
-          ],
-        ),
-        body: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Text(
-              order['model'] as String,
-              style: theme.textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              '${order['customer']} · ${order['code']}',
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+      child: OrdenSocBackdrop(
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: OrdenSocHeader(
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 0,
+            title: Text('Orden ${order['code']}'),
+            actions: [
+              SizedBox(width: MediaQuery.sizeOf(context).width * .22),
+              IconButton(
+                tooltip: 'Eliminar orden',
+                onPressed: _saving
+                    ? null
+                    : () => _deleteWorkshopRecord(
+                        context,
+                        _DeleteTarget.order,
+                        order['code']!,
+                      ),
+                icon: const Icon(Icons.delete_outline),
               ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Chip(label: Text(_status)),
-                OutlinedButton(
-                  onPressed: _saving ? null : _changeStatus,
-                  child: Text(_saving ? 'Guardando…' : 'Cambiar estado'),
-                ),
-                TextButton(
-                  onPressed: _saving ? null : _showHistory,
-                  child: const Text('Ver historial'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _OrderReceptionCard(code: order['code'] as String),
-            const SizedBox(height: 16),
-            _WorkshopPdfButton(code: order['code'] as String),
-            _OrderPhotos(code: order['code'] as String),
-            const SizedBox(height: 16),
-            Text('Datos de la reparación', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 8),
-            Card(
-              child: Column(
+            ],
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Text(
+                order['model'] as String,
+                style: theme.textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 12),
+              Text(order['code'] as String),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  ListTile(
-                    title: const Text('Cliente'),
-                    subtitle: Text(order['customer'] as String),
+                  Chip(label: Text(_status)),
+                  OutlinedButton(
+                    onPressed: _saving ? null : _changeStatus,
+                    child: Text(_saving ? 'Guardando…' : 'Cambiar estado'),
                   ),
-                  ListTile(
-                    title: const Text('Problema informado'),
-                    subtitle: Text(_reportedIssue),
-                    trailing: IconButton(
-                      tooltip: 'Editar problema informado',
-                      onPressed: _saving ? null : _editReportedIssue,
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
+                  TextButton(
+                    onPressed: _saving ? null : _showHistory,
+                    child: const Text('Ver historial'),
                   ),
-                  _CustomerPhoneTile(order: order),
-                  _OrderFrpMethodTile(code: _code),
                 ],
               ),
-            ),
-            const SizedBox(height: 12),
-            _observationCard(),
-            // Bloques del detalle de la orden
-            const SizedBox(height: 20),
-            Text('Presupuesto', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 8),
-            Card(
-              child: _OrderBudgetLink(
-                code: _code,
-                onReturn: () => setState(() => _finance = _loadFinance()),
+              const SizedBox(height: 12),
+              _OrderReceptionCard(code: order['code'] as String),
+              const SizedBox(height: 16),
+              _WorkshopPdfButton(code: order['code'] as String),
+              _OrderPhotos(code: order['code'] as String),
+              const SizedBox(height: 16),
+              Text('Datos de la reparación', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              Card(
+                child: Column(
+                  children: [
+                    ListTile(
+                      // La fila Cliente abre la ficha.
+                      title: const Text('Cliente'),
+                      subtitle: Text(
+                        order['customer'] as String,
+                        style: TextStyle(
+                          color: order['customer_id'] is int
+                              ? theme.colorScheme.primary
+                              : null,
+                        ),
+                      ),
+                      trailing: order['customer_id'] is int
+                          ? const Icon(Icons.chevron_right)
+                          : null,
+                      onTap: _saving || order['customer_id'] is! int
+                          ? null
+                          : () => Navigator.of(context).push<void>(
+                              MaterialPageRoute<void>(
+                                builder: (_) =>
+                                    _CustomerDetails(customer: order),
+                              ),
+                            ),
+                    ),
+                    ListTile(
+                      title: const Text('Problema informado'),
+                      subtitle: Text(_reportedIssue),
+                      trailing: IconButton(
+                        tooltip: 'Editar problema informado',
+                        onPressed: _saving ? null : _editReportedIssue,
+                        icon: const Icon(Icons.edit_outlined),
+                      ),
+                    ),
+                    _CustomerPhoneTile(order: order),
+                    _OrderFrpMethodTile(code: _code),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 20),
-            Text('Resumen económico', style: theme.textTheme.titleLarge),
-            _financeCard(),
-            const SizedBox(height: 20),
-            Text('Entrega', style: theme.textTheme.titleLarge),
-            const SizedBox(height: 8),
-            Card(child: _PickupDateTile(order: order)),
-          ],
+              const SizedBox(height: 12),
+              _observationCard(),
+              // Bloques del detalle de la orden
+              const SizedBox(height: 20),
+              Text('Presupuesto', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              Card(
+                child: _OrderBudgetLink(
+                  code: _code,
+                  onReturn: () => setState(() => _finance = _loadFinance()),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text('Resumen económico', style: theme.textTheme.titleLarge),
+              _financeCard(),
+              const SizedBox(height: 20),
+              Text('Entrega', style: theme.textTheme.titleLarge),
+              const SizedBox(height: 8),
+              Card(child: _PickupDateTile(order: order)),
+            ],
+          ),
         ),
       ),
     );
@@ -1388,19 +1466,13 @@ Future<void> _addCustomerNotice(Database db) async {
   );
 }
 
-Future<List<Map<String, Object?>>> _readContactPending() async {
+Future<void> _saveCustomerNotice(String code) async {
   final db = await _openWorkshop();
-  return db.rawQuery(
-    '''
-    SELECT o.code, o.issue, o.status, TRIM(COALESCE(d.brand || ' ', '') || d.model) AS model, c.name AS customer, o.pickup_date, o.customer_notified_at, c.id AS customer_id, c.phone AS customer_phone
-    FROM work_orders o
-    JOIN devices d ON d.id = o.device_id
-    JOIN customers c ON c.id = d.customer_id
-    WHERE (o.status = ? AND o.customer_notified_at IS NULL)
-       OR (o.pickup_date = ? AND o.status <> ?)
-    ORDER BY o.id DESC
-  ''',
-    ['Entregar', _pickupDayKey(DateTime.now()), 'Retirado'],
+  await db.update(
+    'work_orders',
+    {'customer_notified_at': DateTime.now().millisecondsSinceEpoch},
+    where: 'code = ? AND status = ? AND customer_notified_at IS NULL',
+    whereArgs: [code, 'Entregar'],
   );
 }
 
@@ -1422,74 +1494,14 @@ class WorkshopAgendaLink extends StatelessWidget {
   }
 }
 
-class _WorkshopAgendaPage extends StatefulWidget {
+class _WorkshopAgendaPage extends StatelessWidget {
   const _WorkshopAgendaPage();
-
-  @override
-  State<_WorkshopAgendaPage> createState() => _WorkshopAgendaPageState();
-}
-
-class _WorkshopAgendaPageState extends State<_WorkshopAgendaPage> {
-  late Future<List<Map<String, Object?>>> _pending = _readContactPending();
-  bool _saving = false;
-
-  void _reload() {
-    setState(() => _pending = _readContactPending());
-  }
-
-  Future<void> _markNotified(String code) async {
-    setState(() => _saving = true);
-    try {
-      final db = await _openWorkshop();
-      await db.update(
-        'work_orders',
-        {'customer_notified_at': DateTime.now().millisecondsSinceEpoch},
-        where: 'code = ? AND status = ? AND customer_notified_at IS NULL',
-        whereArgs: [code, 'Entregar'],
-      );
-      if (mounted) _reload();
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No se pudo registrar el aviso.')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Agenda de hoy')),
-      body: FutureBuilder<List<Map<String, Object?>>>(
-        future: _pending,
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(
-              child: OutlinedButton(
-                onPressed: _reload,
-                child: const Text('No se pudo leer Agenda. Reintentar'),
-              ),
-            );
-          }
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final orders = snapshot.requireData;
-          if (orders.isEmpty) {
-            return const Center(
-              child: Text('Sin contactos pendientes ni retiros para hoy.'),
-            );
-          }
-
-          return ListView(
-            padding: const EdgeInsets.all(16),
-            children: [for (final order in orders) _pickupAgendaCard(order)],
-          );
-        },
-      ),
+      appBar: AppBar(title: const Text('Agenda')),
+      body: const WorkshopInicio(agendaOnly: true),
     );
   }
 }
@@ -1583,73 +1595,6 @@ class _PickupDateTileState extends State<_PickupDateTile> {
                 onPressed: _saving ? null : () => _save(null),
                 icon: const Icon(Icons.event_busy_outlined),
               ),
-      ),
-    );
-  }
-}
-
-extension on _WorkshopAgendaPageState {
-  Widget _pickupAgendaCard(Map<String, Object?> order) {
-    final contactPending =
-        order['status'] == 'Entregar' && order['customer_notified_at'] == null;
-    final pickupToday =
-        order['pickup_date'] == _pickupDayKey(DateTime.now()) &&
-        order['status'] != 'Retirado';
-
-    return Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ListTile(
-            title: Text('${order['model']} · ${order['code']}'),
-            subtitle: Text(
-              [
-                order['customer'] as String,
-                if (contactPending) 'Listo para entregar / Contacto pendiente',
-                if (pickupToday) 'Retiro pactado para hoy',
-              ].join('\n'),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Wrap(
-              spacing: 8,
-              children: [
-                TextButton(
-                  onPressed: _saving
-                      ? null
-                      : () async {
-                          await Navigator.of(context).push(
-                            MaterialPageRoute<void>(
-                              builder: (_) => _OrderDetails(order: order),
-                            ),
-                          );
-                          if (mounted) _reload();
-                        },
-                  child: const Text('Ver orden'),
-                ),
-                if (contactPending && order['customer_phone'] is String)
-                  TextButton.icon(
-                    onPressed: _saving
-                        ? null
-                        : () => _openDialer(
-                            context,
-                            order['customer_phone'] as String,
-                          ),
-                    icon: const Icon(Icons.phone_outlined),
-                    label: const Text('Contactar'),
-                  ),
-                if (contactPending)
-                  OutlinedButton(
-                    onPressed: _saving
-                        ? null
-                        : () => _markNotified(order['code'] as String),
-                    child: const Text('Cliente avisado'),
-                  ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -2226,66 +2171,85 @@ class _OrderCustomerPickerState extends State<_OrderCustomerPicker> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Elegir cliente'),
-        actions: [
-          TextButton.icon(
-            onPressed: _createCustomerForOrder,
-            icon: const Icon(Icons.person_add_outlined),
-            label: const Text('Nuevo cliente'),
-          ),
-        ],
-      ),
-
-      body: FutureBuilder<List<Map<String, Object?>>>(
-        future: _customers,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: OutlinedButton(
-                onPressed: () => setState(() => _customers = _readCustomers()),
-                child: const Text('No se pudo cargar Clientes. Reintentar'),
+    // Encabezado de alta de orden.
+    return OrdenSocBackdrop(
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        appBar: OrdenSocHeader(
+          title: const Text('Nueva orden'),
+          headerActions: const [],
+          showSectionMenu: false,
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: IconButton(
+                onPressed: _createCustomerForOrder,
+                icon: const Icon(Icons.person_add_outlined),
+                tooltip: 'Nuevo cliente',
               ),
-            );
-          }
-
-          final customers = snapshot.requireData;
-          if (customers.isEmpty) {
-            return const Center(
-              child: Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'Todavía no hay clientes. Tocá Nuevo cliente para continuar.',
-                ),
-              ),
-            );
-          }
-
-          return ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: customers.length,
-            itemBuilder: (context, index) {
-              final customer = customers[index];
-
-              return Card(
-                child: ListTile(
-                  leading: const Icon(Icons.person_outline),
-                  title: Text(customer['customer'] as String),
-                  subtitle: Text(
-                    customer['customer_phone'] as String? ??
-                        'Sin teléfono registrado',
-                  ),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => Navigator.of(context).pop(customer),
+            ),
+          ],
+        ),
+        body: FutureBuilder<List<Map<String, Object?>>>(
+          future: _customers,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snapshot.hasError) {
+              return Center(
+                child: OutlinedButton(
+                  onPressed: () =>
+                      setState(() => _customers = _readCustomers()),
+                  child: const Text('No se pudo cargar Clientes. Reintentar'),
                 ),
               );
-            },
-          );
-        },
+            }
+
+            final customers = snapshot.requireData;
+            if (customers.isEmpty) {
+              return const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                    'Todavía no hay clientes. Tocá Nuevo cliente para continuar.',
+                  ),
+                ),
+              );
+            }
+
+            return ListView.builder(
+              padding: const EdgeInsets.all(16),
+
+              itemCount: customers.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Elegir cliente',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  );
+                }
+                final customer = customers[index - 1];
+
+                return Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.person_outline),
+                    title: Text(customer['customer'] as String),
+                    subtitle: Text(
+                      customer['customer_phone'] as String? ??
+                          'Sin teléfono registrado',
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).pop(customer),
+                  ),
+                );
+              },
+            );
+          },
+        ),
       ),
     );
   }
@@ -2759,7 +2723,13 @@ Future<void> _createCatalog(Database db) async {
 }
 
 class WorkshopCatalogLink extends StatelessWidget {
-  const WorkshopCatalogLink({super.key, required this.suppliers});
+  const WorkshopCatalogLink({
+    super.key,
+    required this.suppliers,
+    this.supplierNavigation,
+  });
+
+  final Widget? supplierNavigation;
 
   final bool suppliers;
 
@@ -2775,7 +2745,12 @@ class WorkshopCatalogLink extends StatelessWidget {
         title: Text(suppliers ? 'Proveedores' : 'Stock'),
         trailing: const Icon(Icons.chevron_right),
         onTap: () => Navigator.of(context).push<void>(
-          MaterialPageRoute(builder: (_) => _CatalogPage(suppliers: suppliers)),
+          MaterialPageRoute(
+            builder: (_) => _CatalogPage(
+              suppliers: suppliers,
+              supplierNavigation: supplierNavigation,
+            ),
+          ),
         ),
       ),
     );
@@ -2783,7 +2758,13 @@ class WorkshopCatalogLink extends StatelessWidget {
 }
 
 class _CatalogPage extends StatefulWidget {
-  const _CatalogPage({required this.suppliers, this.supplierId});
+  const _CatalogPage({
+    required this.suppliers,
+    this.supplierId,
+    this.supplierNavigation,
+  });
+
+  final Widget? supplierNavigation;
 
   final bool suppliers;
   final int? supplierId;
@@ -2841,12 +2822,39 @@ class _CatalogPageState extends State<_CatalogPage> {
   }
 
   Future<void> _editSupplier([Map<String, Object?>? supplier]) async {
-    final saved = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _SupplierEditor(supplier: supplier),
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => _SupplierEditor(
+          supplier: supplier,
+          supplierNavigation: widget.supplierNavigation,
+        ),
+      ),
     );
+
     if (mounted && saved == true) setState(() => _rows = _load());
+  }
+
+  Widget _supplierAccentCard(Widget child, Color accent) {
+    return Card(
+      color: const Color(0xff22272f),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: Color(0xff3d4652)),
+      ),
+      child: Stack(
+        children: [
+          child,
+          Positioned(
+            left: 1,
+            top: 3,
+            bottom: 3,
+            width: 4,
+            child: IgnorePointer(child: ColoredBox(color: accent)),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _supplierListTile(Map<String, Object?> supplier) {
@@ -2867,7 +2875,10 @@ class _CatalogPageState extends State<_CatalogPage> {
     ].join(', ');
 
     return ListTile(
-      title: Text(supplier['name'] as String),
+      title: Text(
+        supplier['name'] as String,
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -2896,7 +2907,7 @@ class _CatalogPageState extends State<_CatalogPage> {
               tooltip: 'Abrir WhatsApp',
               icon: const FaIcon(
                 FontAwesomeIcons.whatsapp,
-                color: Color(0xFF25D366),
+                color: Color(0xFF66BD88),
                 size: 23,
               ),
               onPressed: () async {
@@ -2926,7 +2937,11 @@ class _CatalogPageState extends State<_CatalogPage> {
   Future<void> _openSupplier(int id) async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
-        builder: (_) => _CatalogPage(suppliers: true, supplierId: id),
+        builder: (_) => _CatalogPage(
+          suppliers: true,
+          supplierId: id,
+          supplierNavigation: widget.supplierNavigation,
+        ),
       ),
     );
     if (mounted) setState(() => _rows = _load());
@@ -2939,24 +2954,46 @@ class _CatalogPageState extends State<_CatalogPage> {
         ? 'Ficha del proveedor'
         : (widget.suppliers ? 'Proveedores' : 'Stock');
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(title),
-        actions: [
-          if (!widget.suppliers)
-            IconButton(
-              tooltip: 'Nuevo repuesto',
-              icon: const Icon(Icons.add),
-              onPressed: () => _editStockItem(),
+    // Encabezado compartido de proveedores.
+    final page = Scaffold(
+      bottomNavigationBar: widget.suppliers ? widget.supplierNavigation : null,
+      backgroundColor: widget.suppliers ? Colors.transparent : null,
+      appBar: widget.suppliers
+          ? OrdenSocHeader(
+              title: Text(title),
+              showSectionMenu: false,
+              headerActions: [
+                if (isDetail)
+                  FutureBuilder<List<Map<String, Object?>>>(
+                    future: _rows,
+                    builder: (context, snapshot) {
+                      final rows = snapshot.data;
+                      if (snapshot.connectionState != ConnectionState.done ||
+                          snapshot.hasError ||
+                          rows == null ||
+                          rows.isEmpty) {
+                        return const SizedBox.shrink();
+                      }
+                      return IconButton(
+                        tooltip: 'Editar proveedor',
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => _editSupplier(rows.first),
+                      );
+                    },
+                  ),
+              ],
+            )
+          : AppBar(
+              title: Text(title),
+              actions: [
+                if (!widget.suppliers)
+                  IconButton(
+                    tooltip: 'Nuevo repuesto',
+                    icon: const Icon(Icons.add),
+                    onPressed: () => _editStockItem(),
+                  ),
+              ],
             ),
-          if (widget.suppliers && !isDetail)
-            IconButton(
-              tooltip: 'Nuevo proveedor',
-              icon: const Icon(Icons.add),
-              onPressed: () => _editSupplier(),
-            ),
-        ],
-      ),
       body: FutureBuilder<List<Map<String, Object?>>>(
         future: _rows,
         builder: (context, snapshot) {
@@ -2973,7 +3010,7 @@ class _CatalogPageState extends State<_CatalogPage> {
           }
 
           final rows = snapshot.requireData;
-          if (rows.isEmpty) {
+          if (rows.isEmpty && (!widget.suppliers || isDetail)) {
             return const Center(child: Text('No hay registros disponibles.'));
           }
 
@@ -2982,15 +3019,39 @@ class _CatalogPageState extends State<_CatalogPage> {
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                ListTile(
-                  title: Text(supplier['name'] as String),
-                  trailing: IconButton(
-                    tooltip: 'Editar proveedor',
-                    icon: const Icon(Icons.edit_outlined),
-                    onPressed: () => _editSupplier(supplier),
-                  ),
-                  subtitle: Text(
-                    supplier['contact'] as String? ?? 'Sin contacto registrado',
+                // Ficha de proveedor: identidad y contacto
+                Card(
+                  child: ListTile(
+                    title: Text(
+                      supplier['name'] as String,
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    subtitle: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Container(
+                        margin: const EdgeInsets.only(top: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: supplier['active'] == 1
+                                ? const Color(0xff66bd88)
+                                : const Color(0xffaab2be),
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          supplier['active'] == 1 ? 'Activo' : 'Inactivo',
+                          style: TextStyle(
+                            color: supplier['active'] == 1
+                                ? const Color(0xff66bd88)
+                                : const Color(0xffaab2be),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
                 const Divider(),
@@ -3020,9 +3081,22 @@ class _CatalogPageState extends State<_CatalogPage> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              if (widget.suppliers) ...[
+                _supplierAccentCard(
+                  ListTile(
+                    leading: const Icon(Icons.add_circle_outline),
+                    title: const Text('Nuevo proveedor'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => _editSupplier(),
+                  ),
+                  const Color(0xff00cbe7),
+                ),
+                const SizedBox(height: 8),
+              ],
               TextField(
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.search),
+                  border: widget.suppliers ? const OutlineInputBorder() : null,
                   labelText: widget.suppliers
                       ? 'Buscar proveedor'
                       : 'Buscar repuesto o modelo',
@@ -3031,13 +3105,18 @@ class _CatalogPageState extends State<_CatalogPage> {
                     setState(() => _search = value.trim().toLowerCase()),
               ),
               const SizedBox(height: 12),
-              if (matches.isEmpty)
+              if (rows.isEmpty)
+                const ListTile(title: Text('Todavía no hay proveedores'))
+              else if (matches.isEmpty)
                 const ListTile(title: Text('Sin coincidencias')),
               for (final row in matches)
-                Card(
-                  child: widget.suppliers
-                      ? _supplierListTile(row)
-                      : ListTile(
+                widget.suppliers
+                    ? _supplierAccentCard(
+                        _supplierListTile(row),
+                        const Color(0xffc9a6f2),
+                      )
+                    : Card(
+                        child: ListTile(
                           title: Text(row['name'] as String),
                           subtitle: Text(
                             '${row['model']}\n${row['supplier'] ?? 'Sin proveedor'}',
@@ -3062,12 +3141,13 @@ class _CatalogPageState extends State<_CatalogPage> {
                               ? () => _openSupplier(row['supplier_id'] as int)
                               : null,
                         ),
-                ),
+                      ),
             ],
           );
         },
       ),
     );
+    return widget.suppliers ? OrdenSocBackdrop(child: page) : page;
   }
 }
 
@@ -4159,9 +4239,17 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(widget.deviceLabel),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.phone_android),
+              title: Text(widget.deviceLabel),
+            ),
+            const SizedBox(height: 10),
             TextFormField(
-              decoration: const InputDecoration(labelText: 'Falla declarada'),
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Falla declarada',
+              ),
               minLines: 2,
               maxLines: 4,
               onChanged: (value) => _issue = value.trim(),
@@ -4169,14 +4257,18 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
                   ? 'Ingresá la falla que informó el cliente.'
                   : null,
             ),
+            const SizedBox(height: 10),
             TextFormField(
               decoration: const InputDecoration(
+                border: OutlineInputBorder(),
                 labelText: 'Accesorios recibidos',
               ),
               onChanged: (value) => _accessories = value.trim(),
             ),
+            const SizedBox(height: 10),
             TextFormField(
               decoration: const InputDecoration(
+                border: OutlineInputBorder(),
                 labelText: 'Observaciones del ingreso',
               ),
               minLines: 2,
@@ -4184,10 +4276,13 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
               onChanged: (value) => _notes = value.trim(),
             ),
             const SizedBox(height: 12),
-            const Text('Estado'),
-            DropdownButton<String>(
+            DropdownButtonFormField<String>(
               isExpanded: true,
-              value: _status,
+              initialValue: _status,
+              decoration: const InputDecoration(
+                labelText: 'Estado',
+                border: OutlineInputBorder(),
+              ),
               items: [
                 for (final status in _OrderDetailsState._statuses)
                   DropdownMenuItem(value: status, child: Text(status)),
@@ -4343,16 +4438,34 @@ class _SupplierContactDetails extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ListTile(
-          title: const Text('Estado'),
-          subtitle: Text(supplier['active'] == 1 ? 'Activo' : 'Inactivo'),
+        Card(
+          child: Column(
+            children: [
+              if ((supplier['contact'] as String? ?? '').trim().isNotEmpty)
+                ListTile(
+                  title: const Text('Contacto registrado'),
+                  subtitle: Text(supplier['contact'] as String),
+                ),
+              for (final field in _supplierFields.entries)
+                if (supplier[field.key] != null)
+                  ListTile(
+                    leading: Icon(switch (field.key) {
+                      'phone' => Icons.call_outlined,
+                      'email' => Icons.mail_outline,
+                      'address' || 'city' => Icons.location_on_outlined,
+                      'website' => Icons.language,
+                      'contact_person' => Icons.person_outline,
+                      'hours' => Icons.schedule_outlined,
+                      _ => Icons.info_outline,
+                    }),
+                    title: Text(field.value),
+
+                    subtitle: Text(supplier[field.key].toString()),
+                  ),
+            ],
+          ),
         ),
-        for (final field in _supplierFields.entries)
-          if (supplier[field.key] != null)
-            ListTile(
-              title: Text(field.value),
-              subtitle: Text(supplier[field.key].toString()),
-            ),
+        const SizedBox(height: 8),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Wrap(
@@ -4368,7 +4481,11 @@ class _SupplierContactDetails extends StatelessWidget {
                 ),
               if (RegExp(r'^\+[1-9][0-9]{5,14}$').hasMatch(phone))
                 OutlinedButton.icon(
-                  icon: const Icon(Icons.chat_outlined, color: Colors.green),
+                  icon: const FaIcon(
+                    FontAwesomeIcons.whatsapp,
+                    color: Color(0xFF66BD88),
+                    size: 18,
+                  ),
                   label: const Text('WhatsApp'),
                   onPressed: () => _open(
                     context,
@@ -4409,7 +4526,9 @@ class _SupplierContactDetails extends StatelessWidget {
 }
 
 class _SupplierEditor extends StatefulWidget {
-  const _SupplierEditor({this.supplier});
+  const _SupplierEditor({this.supplier, this.supplierNavigation});
+
+  final Widget? supplierNavigation;
 
   final Map<String, Object?>? supplier;
 
@@ -4476,100 +4595,162 @@ class _SupplierEditorState extends State<_SupplierEditor> {
 
   @override
   Widget build(BuildContext context) {
+    const camposPrincipales = ['phone', 'address', 'city'];
     return PopScope(
       canPop: !_saving,
-      child: AlertDialog(
-        scrollable: true,
-        title: Text(
-          widget.supplier == null ? 'Nuevo proveedor' : 'Editar proveedor',
-        ),
-        content: Form(
-          key: _form,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                initialValue: _name,
-                enabled: !_saving,
-                decoration: const InputDecoration(
-                  labelText: 'Nombre comercial',
-                ),
-                onChanged: (value) => _name = value,
-                validator: (value) =>
-                    (value ?? '').trim().isEmpty ? 'Ingresá el nombre.' : null,
-              ),
-              TextFormField(
-                initialValue: _contact,
-                enabled: !_saving,
-                decoration: const InputDecoration(
-                  labelText: 'Contacto anterior (opcional)',
-                  helperText: 'Teléfono, correo o enlace',
-                ),
-                onChanged: (value) => _contact = value,
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(_active ? 'Activo' : 'Inactivo'),
-                value: _active,
-                onChanged: _saving
-                    ? null
-                    : (value) => setState(() => _active = value),
-              ),
-              for (final field in _supplierFields.entries)
-                TextFormField(
-                  initialValue: _fields[field.key],
-                  enabled: !_saving,
-                  minLines: field.key == 'notes' ? 3 : 1,
-                  maxLines: field.key == 'notes' ? 6 : 1,
-                  keyboardType: switch (field.key) {
-                    'phone' => TextInputType.phone,
-                    'website' => TextInputType.url,
-                    'email' => TextInputType.emailAddress,
-                    'warranty_days' => TextInputType.number,
-                    'notes' => TextInputType.multiline,
-                    _ => TextInputType.text,
-                  },
-                  decoration: InputDecoration(
-                    labelText: field.value,
-                    helperText: field.key == 'phone'
-                        ? 'Para WhatsApp, usá + y el código de país.'
-                        : null,
+      // Formulario de proveedor a pantalla completa.
+      child: OrdenSocBackdrop(
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          appBar: OrdenSocHeader(
+            title: Text(
+              widget.supplier == null ? 'Nuevo proveedor' : 'Editar proveedor',
+            ),
+            showSectionMenu: false,
+            headerActions: const [],
+          ),
+          body: SingleChildScrollView(
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            padding: const EdgeInsets.all(16),
+            child: Form(
+              key: _form,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: TextFormField(
+                      initialValue: _name,
+                      enabled: !_saving,
+                      decoration: const InputDecoration(
+                        labelText: 'Nombre comercial',
+                        prefixIcon: Icon(Icons.storefront_outlined),
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (value) => _name = value,
+                      validator: (value) => (value ?? '').trim().isEmpty
+                          ? 'Ingresá el nombre.'
+                          : null,
+                    ),
                   ),
-                  onChanged: (value) => _fields[field.key] = value,
-                  validator: (input) {
-                    final value = (input ?? '').trim();
-                    if (value.isEmpty) return null;
-                    if (field.key == 'website' &&
-                        _supplierWebsite(value) == null) {
-                      return 'Ingresá una dirección web válida.';
-                    }
-                    if (field.key == 'phone' &&
-                        !RegExp(
-                          r'^\+?[0-9]{6,15}$',
-                        ).hasMatch(value.replaceAll(RegExp(r'[\s().-]'), ''))) {
-                      return 'Ingresá un teléfono válido.';
-                    }
-                    if (field.key == 'warranty_days' &&
-                        (int.tryParse(value) ?? -1) < 0) {
-                      return 'Ingresá una cantidad de días válida.';
-                    }
-                    return null;
-                  },
+                  for (final field in [
+                    for (final key in camposPrincipales)
+                      MapEntry(key, _supplierFields[key]!),
+                    for (final field in _supplierFields.entries)
+                      if (!camposPrincipales.contains(field.key)) field,
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: TextFormField(
+                        initialValue: _fields[field.key],
+                        enabled: !_saving,
+                        minLines: field.key == 'notes' ? 3 : 1,
+                        maxLines: field.key == 'notes' ? 6 : 1,
+                        keyboardType: switch (field.key) {
+                          'phone' => TextInputType.phone,
+                          'website' => TextInputType.url,
+                          'email' => TextInputType.emailAddress,
+                          'warranty_days' => TextInputType.number,
+                          'notes' => TextInputType.multiline,
+                          _ => TextInputType.text,
+                        },
+                        decoration: InputDecoration(
+                          labelText: field.value,
+                          border: const OutlineInputBorder(),
+                          prefixIcon: Icon(switch (field.key) {
+                            'phone' => Icons.call_outlined,
+                            'address' || 'city' => Icons.location_on_outlined,
+                            'website' => Icons.language,
+                            'email' => Icons.mail_outline,
+                            'contact_person' => Icons.person_outline,
+                            'hours' => Icons.schedule_outlined,
+                            _ => Icons.info_outline,
+                          }),
+
+                          helperText: field.key == 'phone'
+                              ? 'Para WhatsApp, usá + y el código de país.'
+                              : null,
+                        ),
+                        onChanged: (value) => _fields[field.key] = value,
+                        validator: (input) {
+                          final value = (input ?? '').trim();
+                          if (value.isEmpty) return null;
+                          if (field.key == 'website' &&
+                              _supplierWebsite(value) == null) {
+                            return 'Ingresá una dirección web válida.';
+                          }
+                          if (field.key == 'phone' &&
+                              !RegExp(r'^\+?[0-9]{6,15}$').hasMatch(
+                                value.replaceAll(RegExp(r'[\s().-]'), ''),
+                              )) {
+                            return 'Ingresá un teléfono válido.';
+                          }
+                          if (field.key == 'warranty_days' &&
+                              (int.tryParse(value) ?? -1) < 0) {
+                            return 'Ingresá una cantidad de días válida.';
+                          }
+                          return null;
+                        },
+                      ),
+                    ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(_active ? 'Activo' : 'Inactivo'),
+                    value: _active,
+                    onChanged: _saving
+                        ? null
+                        : (value) => setState(() => _active = value),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: TextFormField(
+                      initialValue: _contact,
+                      enabled: !_saving,
+                      decoration: const InputDecoration(
+                        labelText: 'Contacto anterior (opcional)',
+                        helperText: 'Teléfono, correo o enlace',
+                      ),
+                      onChanged: (value) => _contact = value,
+                    ),
+                  ),
+                  if (_error != null) Text(_error!),
+                ],
+              ),
+            ),
+          ),
+          bottomNavigationBar: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  child: OverflowBar(
+                    alignment: MainAxisAlignment.end,
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: _saving
+                            ? null
+                            : () => Navigator.of(context).pop(),
+                        child: const Text('Cancelar'),
+                      ),
+                      FilledButton(
+                        onPressed: _saving ? null : _save,
+                        child: Text(_saving ? 'Guardando…' : 'Guardar'),
+                      ),
+                    ],
+                  ),
                 ),
-              if (_error != null) Text(_error!),
-            ],
+                if (widget.supplierNavigation case final navigation?)
+                  ExcludeFocus(
+                    excluding: _saving,
+                    child: IgnorePointer(ignoring: _saving, child: navigation),
+                  ),
+              ],
+            ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : () => Navigator.of(context).pop(),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: _saving ? null : _save,
-            child: Text(_saving ? 'Guardando…' : 'Guardar'),
-          ),
-        ],
       ),
     );
   }
