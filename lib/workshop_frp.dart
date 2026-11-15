@@ -478,7 +478,12 @@ class _FrpPendingDevicesPageState extends State<FrpPendingDevicesPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Equipos sin cliente')),
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: const Text('Equipos sin cliente'),
+        showBackButton: true,
+        showSectionMenu: false,
+      ),
       body: FutureBuilder<List<Map<String, Object?>>>(
         future: _rows,
         builder: (context, snapshot) {

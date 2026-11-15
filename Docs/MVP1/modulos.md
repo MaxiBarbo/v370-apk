@@ -12,6 +12,9 @@ Este mapa registra responsabilidades, **no asegura que cada módulo exista como 
 | Stock y proveedores | Catálogo, existencia y movimientos | Relaciones y restricciones de inventario |
 | FRP | Compilación, binario, SoC y vinculación | Equipo y, opcionalmente, orden |
 | PDF | Comprobantes y anexos | Cliente, equipo, orden, presupuesto, fotografías |
+| Respaldo | Crear y combinar copias JSON con vista previa | `workshop_backup.dart`, SQLite, canal Android `v370/backup` |
+| Exportación de planillas | XLSX con Resumen de trabajos, Clientes, Órdenes y Presupuestos | `workshop_export.dart`, consultas de taller y selector Android |
+| Seguimiento manual | Abrir una planilla externa desde un enlace editable | Preferencias. Incluir el enlace en la copia depende del paquete v23 |
 | Base local | Apertura, migraciones, transacciones | Todos los módulos persistentes |
 
 ## Dependencias que merecen atención

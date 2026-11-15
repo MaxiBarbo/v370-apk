@@ -104,33 +104,26 @@ class OrdenSocHeader extends AppBar {
          ),
          title: const Padding(
            padding: EdgeInsets.only(top: 14),
-           child: _SocBrand(),
+           child: _V370LogoInicio(),
          ),
          actions: [
            Padding(
              padding: const EdgeInsets.only(top: 14, right: 4),
              child: Row(
                mainAxisSize: MainAxisSize.min,
-               children:
-                   headerActions ??
-                   [
-                     IconButton(
-                       tooltip: onSearch == null
-                           ? 'Búsqueda global · pendiente de conectar'
-                           : 'Buscar',
-                       onPressed: onSearch,
-                       disabledColor: const Color(0xffaeb8c5),
-                       icon: const Icon(Icons.search, size: 21),
-                     ),
-                     IconButton(
-                       tooltip: onNotifications == null
-                           ? 'Notificaciones · pendiente de conectar'
-                           : 'Notificaciones',
-                       onPressed: onNotifications,
-                       disabledColor: const Color(0xffaeb8c5),
-                       icon: const Icon(Icons.notifications_none, size: 21),
-                     ),
-                   ],
+               children: [
+                 ...?headerActions,
+                 if (headerActions == null)
+                   IconButton(
+                     tooltip: onSearch == null
+                         ? 'Búsqueda global · pendiente de conectar'
+                         : 'Buscar',
+                     onPressed: onSearch,
+                     disabledColor: const Color(0xffaeb8c5),
+                     icon: const Icon(Icons.search, size: 21),
+                   ),
+                 V370Campana(onPressed: onNotifications),
+               ],
              ),
            ),
          ],
@@ -510,4 +503,66 @@ class _SocPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SocPainter oldDelegate) =>
       oldDelegate.cycle != cycle || oldDelegate.topInset != topInset;
+}
+
+class V370Campana extends StatelessWidget {
+  const V370Campana({super.key, this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: 'Consultas recibidas',
+      icon: const Icon(Icons.notifications_none, size: 21),
+      onPressed:
+          onPressed ??
+          () => Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(builder: (_) => const _ConsultasWebPage()),
+          ),
+    );
+  }
+}
+
+class _ConsultasWebPage extends StatelessWidget {
+  const _ConsultasWebPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: const Text('Consultas recibidas'),
+        headerActions: const [],
+        showSectionMenu: false,
+        onNotifications: () => ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ya estás en Consultas recibidas.')),
+        ),
+      ),
+      body: const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            'La conexión con las consultas de la web está pendiente.',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _V370LogoInicio extends StatelessWidget {
+  const _V370LogoInicio();
+
+  @override
+  Widget build(BuildContext context) {
+    final inicio = context.dependOnInheritedWidgetOfExactType<SocHomeScope>();
+    return IconButton(
+      tooltip: 'Ir a Inicio',
+      onPressed: inicio?.onHome,
+      padding: EdgeInsets.zero,
+      icon: const _SocBrand(),
+    );
+  }
 }

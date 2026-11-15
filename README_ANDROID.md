@@ -16,6 +16,12 @@ cd '/h/Repositorios Github/Web-Reparacion-Celulares/V370_apk'
 
 ## 2. Inicio rápido: emulador y aplicación
 
+### Conectar S22 a la pc
+
+ADB="$(cygpath -u "$LOCALAPPDATA")/Android/sdk/platform-tools/adb.exe"
+read -rp 'IP y puerto de vinculación: ' VINCULACION
+"$ADB" pair "$VINCULACION"
+
 ### Ver emuladores disponibles
 
 ```bash

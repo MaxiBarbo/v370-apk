@@ -117,7 +117,7 @@ class _WorkshopInicioState extends State<WorkshopInicio>
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: accent ?? const Color(0xff3b414b)),
       ),
-      child: child,
+      child: Material(type: MaterialType.transparency, child: child),
     );
     if (accent == null) return panel;
     return ClipRRect(
@@ -423,12 +423,14 @@ class _WorkshopInicioState extends State<WorkshopInicio>
                   else if (!snapshot.hasData)
                     const Center(child: CircularProgressIndicator())
                   else if (agenda.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(
-                        isToday
-                            ? 'No hay pendientes para hoy.'
-                            : 'No hay retiros pactados para ese día.',
+                    Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.event_available_outlined),
+                        title: Text(
+                          isToday
+                              ? 'No hay pendientes para hoy.'
+                              : 'No hay retiros pactados para ese día.',
+                        ),
                       ),
                     )
                   else

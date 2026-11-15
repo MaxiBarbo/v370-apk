@@ -8,6 +8,20 @@
 
 **Importante:** esta relación combina evidencia parcial e historial de scripts, y **no es un inventario definitivo de tablas existentes**. La cifra “12” indicada en una revisión anterior no debe tratarse como definitiva. `order_payments` aparece expresamente en el script de migración financiera a versión 15; `paid_orders` aparece en un script posterior relacionado con la versión 16. Falta verificar el esquema actualizado en ejecución.
 
+## Versiones y cambios recientes
+
+| Versión | Evidencia | Cambio |
+| --- | --- | --- |
+| v21 | Copia de código compartida | Flujo FRP y tabla `frp_pending_devices`. En la creación de base, `devices.customer_id` es obligatorio. |
+| v22 | Paquete de respaldo aplicado y probado en el emulador | Identidades `backup_id` con índice y asignación automática en las tablas que las usan. Presupuestos, cobrado y FRP usan la clave del registro relacionado. |
+| v23 | Paquete preparado. La ejecución registrada restauró el código tras el análisis | Campo `work_orders.work_performed` y compatibilidad prevista con respaldos previos sin ese campo. Incluye el enlace editable de seguimiento en el JSON cuando existe. |
+
+La copia JSON `v370-backup-1` incluye registros de taller, la secuencia de órdenes y fotos en Base64, con límite de 32 MB. La importación remapea relaciones y conserva los registros locales ausentes del archivo. El cálculo previo se revierte. La importación confirmada es transaccional y verifica cobros, saldo de stock y coincidencia con el resumen mostrado.
+
+El exportador revisado produce un XLSX de cuatro pestañas. El enlace a la planilla manual de seguimiento es independiente. Verificar qué exportador quedó instalado y abrir el archivo generado.
+
+La relación `stock_items.supplier_id` usa `ON DELETE SET NULL`. El borrado de proveedor conserva repuestos y cantidades. Se verificó este efecto en SQLite de prueba.
+
 ## Relaciones de referencia
 
 - Cliente → equipos.

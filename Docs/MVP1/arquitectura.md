@@ -16,6 +16,8 @@ La APK v370 utiliza **Flutter/Dart** y una base **SQLite local**. Está diseñad
 | `lib/v370_binario_samsung.dart` | Análisis de binario Samsung | Dependencia referenciada |
 | `lib/velo_azul.dart` | Fondo animado | Mención en desarrollo; revisar versión vigente |
 
+La copia compartida configura SQLite v21. Los paquetes agregan respaldo mediante `workshop_backup.dart` y un canal Android para elegir archivos, y exportación mediante `workshop_export.dart`. Ambos archivos Dart usan `part of 'workshop_sample.dart'`. La campanita abre la pantalla de Consultas, cuya conexión web figura pendiente en la copia revisada.
+
 No se ha comprobado la distribución completa de clases, servicios e imports del código instalado. Separar un archivo no garantiza independencia modular: la relación `part of` comparte biblioteca Dart.
 
 ## Arquitectura objetivo (NO implementada completamente)

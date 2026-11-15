@@ -2,6 +2,10 @@
 
 **Estado:** documentación preliminar basada en evidencia histórica y revisión parcial. No equivale a una auditoría del proyecto Flutter vigente.
 
+**Revisión del 14/11/2026.** Se contrastaron la copia compartida de la APK y los paquetes de respaldo, planillas, trabajo realizado y bajas de proveedores. La validación del proyecto instalado sigue abierta.
+
+[Datos, respaldos y verificación en Google Docs](https://docs.google.com/document/d/1t4I2aMLXi5aS_gOuq4nl300eNseGLkhIBG0MC-nB-eE/edit) · [Resumen del MVP 1 en Notion](https://app.notion.com/p/40f9f5dbfb9381b0a186d7ae4b8b0874)
+
 ## Por dónde empezar
 
 1. [`arquitectura.md`](arquitectura.md): qué está construido y qué se propone.

@@ -1,8 +1,11 @@
 import 'dart:async' show Timer;
 import 'dart:typed_data';
+import 'dart:convert';
 
+import 'package:archive/archive.dart' show Archive, ArchiveFile, ZipEncoder;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:flutter/services.dart'
+    show Clipboard, ClipboardData, MethodChannel;
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:pdf/pdf.dart' show PdfColor;
 import 'package:pdf/widgets.dart' as pw;
@@ -16,6 +19,8 @@ import 'orden_soc.dart';
 part 'workshop_finance.dart';
 part 'workshop_frp.dart';
 part 'workshop_inicio.dart';
+part 'workshop_backup.dart';
+part 'workshop_export.dart';
 
 Future<void> _addFollowUpNotes(Database db) async {
   await db.execute('ALTER TABLE work_orders ADD COLUMN follow_up_notes TEXT');
@@ -38,7 +43,7 @@ Future<Database> _openWorkshop() async {
   final directory = await getDatabasesPath();
   return openDatabase(
     '$directory/v370_workshop.db',
-    version: 21,
+    version: 23,
     onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 19) {
         await _createDeviceFrp(db);
@@ -65,6 +70,12 @@ Future<Database> _openWorkshop() async {
       if (oldVersion < 17) await _addFollowUpNotes(db);
       if (oldVersion < 18) await _addContactDetails(db);
       if (oldVersion < 21) await _addFrpWorkflow(db);
+      if (oldVersion < 22) await _addBackupIds(db);
+      if (oldVersion < 23) {
+        await db.execute(
+          'ALTER TABLE work_orders ADD COLUMN work_performed TEXT',
+        );
+      }
     },
     onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
     onCreate: (db, version) async {
@@ -122,19 +133,27 @@ Future<Database> _openWorkshop() async {
       await _addPaidOrders(db);
       await _addContactDetails(db);
       await _addFollowUpNotes(db);
+      await _addBackupIds(db);
+      await db.execute(
+        'ALTER TABLE work_orders ADD COLUMN work_performed TEXT',
+      );
     },
   );
 }
 
-Future<List<Map<String, Object?>>> _readOrders() async {
+Future<List<Map<String, Object?>>> _readOrders({String? code}) async {
   final db = await _openWorkshop();
-  return db.rawQuery('''
+  return db.rawQuery(
+    '''
     SELECT o.code, o.issue, o.status, TRIM(COALESCE(d.brand || ' ', '') || d.model) AS model, c.name AS customer, o.pickup_date, o.customer_notified_at, c.id AS customer_id, c.phone AS customer_phone
     FROM work_orders o
     JOIN devices d ON d.id = o.device_id
     JOIN customers c ON c.id = d.customer_id
+    WHERE (? IS NULL OR o.code = ?)
     ORDER BY o.id DESC
-  ''');
+  ''',
+    [code, code],
+  );
 }
 
 class WorkshopSampleLink extends StatelessWidget {
@@ -371,7 +390,30 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
               ),
               const SizedBox(height: 12),
               if (visibleOrders.isEmpty)
-                const ListTile(title: Text('Sin coincidencias')),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.search_off),
+                    title: Text(
+                      isCustomers
+                          ? 'Sin clientes que coincidan'
+                          : 'Sin órdenes que coincidan',
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Probá con otra búsqueda o filtro.'),
+                        if (!isCustomers && _searchText.isNotEmpty)
+                          TextButton(
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _searchText = '');
+                            },
+                            child: const Text('Limpiar búsqueda'),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               for (final order in visibleOrders)
                 Card(
                   child: ListTile(
@@ -423,20 +465,31 @@ class _OrderDetails extends StatefulWidget {
 }
 
 class _OrderDetailsState extends State<_OrderDetails> {
-  late Future<String?> _observation = _loadObservation();
+  late Future<String?> _workPerformed = _loadOrderText('work_performed');
+  late Future<String?> _observation = _loadOrderText('follow_up_notes');
 
-  Future<String?> _loadObservation() async {
+  void _setOrderText(bool work, Future<String?> value) {
+    setState(() {
+      if (work) {
+        _workPerformed = value;
+      } else {
+        _observation = value;
+      }
+    });
+  }
+
+  Future<String?> _loadOrderText(String column) async {
     final db = await _openWorkshop();
     final rows = await db.query(
       'work_orders',
-      columns: ['follow_up_notes'],
+      columns: [column],
       where: 'code = ?',
       whereArgs: [widget.order['code']],
     );
-    return rows.single['follow_up_notes'] as String?;
+    return rows.single[column] as String?;
   }
 
-  Future<void> _editObservation(String? previous) async {
+  Future<void> _editObservation(String? previous, bool work) async {
     final form = GlobalKey<FormState>();
     var text = previous ?? '';
     final result = await showDialog<String>(
@@ -444,7 +497,11 @@ class _OrderDetailsState extends State<_OrderDetails> {
       builder: (dialog) => AlertDialog(
         scrollable: true,
         title: Text(
-          previous == null ? 'Agregar observación' : 'Editar observación',
+          work
+              ? 'Trabajo realizado'
+              : (previous == null
+                    ? 'Agregar observación'
+                    : 'Editar observación'),
         ),
         content: Form(
           key: form,
@@ -454,12 +511,16 @@ class _OrderDetailsState extends State<_OrderDetails> {
             minLines: 3,
             maxLines: 8,
             keyboardType: TextInputType.multiline,
-            decoration: const InputDecoration(
-              labelText: 'Observaciones de seguimiento',
+            decoration: InputDecoration(
+              labelText: work
+                  ? 'Trabajo realizado'
+                  : 'Observaciones de seguimiento',
             ),
             onChanged: (value) => text = value,
             validator: (value) => (value ?? '').trim().isEmpty
-                ? 'Ingresá una observación.'
+                ? work
+                      ? 'Ingresá el trabajo realizado.'
+                      : 'Ingresá una observación.'
                 : null,
           ),
         ),
@@ -480,16 +541,18 @@ class _OrderDetailsState extends State<_OrderDetails> {
       ),
     );
     if (!mounted || result == null || result == previous) return;
-    await _saveObservation(previous, result);
+    await _saveObservation(previous, result, work);
   }
 
-  Future<void> _deleteObservation(String previous) async {
+  Future<void> _deleteObservation(String previous, bool work) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialog) => AlertDialog(
-        title: const Text('Borrar observación'),
-        content: const Text(
-          'Se borrará el texto de seguimiento de esta orden.',
+        title: Text(work ? 'Borrar trabajo realizado' : 'Borrar observación'),
+        content: Text(
+          work
+              ? 'Se borrará el trabajo realizado de esta orden.'
+              : 'Se borrará el texto de seguimiento de esta orden.',
         ),
         actions: [
           TextButton(
@@ -504,37 +567,43 @@ class _OrderDetailsState extends State<_OrderDetails> {
       ),
     );
     if (!mounted || confirmed != true) return;
-    await _saveObservation(previous, null);
+    await _saveObservation(previous, null, work);
   }
 
-  Future<void> _saveObservation(String? previous, String? value) async {
+  Future<void> _saveObservation(
+    String? previous,
+    String? value,
+    bool work,
+  ) async {
+    final column = work ? 'work_performed' : 'follow_up_notes';
     if (_saving) return;
     setState(() => _saving = true);
     try {
       final db = await _openWorkshop();
       final updated = await db.update(
         'work_orders',
-        {'follow_up_notes': value},
-        where: 'code = ? AND follow_up_notes IS ?',
+        {column: value},
+        where: 'code = ? AND $column IS ?',
         whereArgs: [widget.order['code'], previous],
       );
       if (!mounted) return;
       if (updated != 1) {
-        setState(() => _observation = _loadObservation());
+        _setOrderText(
+          work,
+          _loadOrderText(work ? 'work_performed' : 'follow_up_notes'),
+        );
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'La orden cambió. Revisá la observación y reintentá.',
-            ),
+            content: Text('La orden cambió. Revisá el texto y reintentá.'),
           ),
         );
         return;
       }
-      setState(() => _observation = Future<String?>.value(value));
+      _setOrderText(work, Future<String?>.value(value));
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No se pudo guardar la observación.')),
+          const SnackBar(content: Text('No se pudo guardar el texto.')),
         );
       }
     } finally {
@@ -542,18 +611,21 @@ class _OrderDetailsState extends State<_OrderDetails> {
     }
   }
 
-  Widget _observationCard() => Card(
+  Widget _observationCard({bool work = false}) => Card(
     child: FutureBuilder<String?>(
-      future: _observation,
+      future: work ? _workPerformed : _observation,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const LinearProgressIndicator();
         }
         if (snapshot.hasError) {
           return ListTile(
-            title: const Text('No se pudo cargar la observación.'),
+            title: const Text('No se pudo cargar el texto.'),
             subtitle: const Text('Tocá para reintentar.'),
-            onTap: () => setState(() => _observation = _loadObservation()),
+            onTap: () => _setOrderText(
+              work,
+              _loadOrderText(work ? 'work_performed' : 'follow_up_notes'),
+            ),
           );
         }
         final text = snapshot.data;
@@ -561,8 +633,12 @@ class _OrderDetailsState extends State<_OrderDetails> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             ListTile(
-              title: const Text('Observaciones de seguimiento'),
-              subtitle: Text(text ?? 'Sin observaciones'),
+              title: Text(
+                work ? 'Trabajo realizado' : 'Observaciones de seguimiento',
+              ),
+              subtitle: Text(
+                text ?? (work ? 'Sin trabajo registrado' : 'Sin observaciones'),
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -570,14 +646,16 @@ class _OrderDetailsState extends State<_OrderDetails> {
                 spacing: 8,
                 children: [
                   TextButton(
-                    onPressed: _saving ? null : () => _editObservation(text),
+                    onPressed: _saving
+                        ? null
+                        : () => _editObservation(text, work),
                     child: Text(text == null ? 'Agregar' : 'Editar'),
                   ),
                   if (text != null)
                     TextButton(
                       onPressed: _saving
                           ? null
-                          : () => _deleteObservation(text),
+                          : () => _deleteObservation(text, work),
                       child: const Text('Borrar'),
                     ),
                 ],
@@ -597,6 +675,12 @@ class _OrderDetailsState extends State<_OrderDetails> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         scrollable: true,
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: const Text('Editar problema informado'),
         content: Form(
           key: form,
@@ -605,7 +689,10 @@ class _OrderDetailsState extends State<_OrderDetails> {
             autofocus: true,
             minLines: 2,
             maxLines: 5,
-            decoration: const InputDecoration(labelText: 'Descripción'),
+            decoration: const InputDecoration(
+              labelText: 'Descripción',
+              border: OutlineInputBorder(),
+            ),
             onChanged: (value) => input = value,
             validator: (value) => (value ?? '').trim().isEmpty
                 ? 'Ingresá una descripción.'
@@ -770,6 +857,12 @@ class _OrderDetailsState extends State<_OrderDetails> {
     final corrected = await showDialog<int>(
       context: context,
       builder: (dialog) => AlertDialog(
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: const Text('Editar seña'),
         content: Form(
           key: form,
@@ -933,6 +1026,12 @@ class _OrderDetailsState extends State<_OrderDetails> {
     final amount = await showDialog<int>(
       context: context,
       builder: (dialog) => AlertDialog(
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: Text(deposit ? 'Registrar seña' : 'Registrar cobro'),
         content: Form(
           key: form,
@@ -1044,7 +1143,7 @@ class _OrderDetailsState extends State<_OrderDetails> {
         child: Column(
           children: [
             ListTile(
-              title: Text(agreed == null ? 'Presupuesto' : 'Total acordado'),
+              title: Text(agreed == null ? 'Presupuesto' : 'Importe acordado'),
               trailing: Text(
                 agreed != null
                     ? _money(agreed)
@@ -1054,14 +1153,14 @@ class _OrderDetailsState extends State<_OrderDetails> {
               ),
             ),
             ListTile(
-              title: const Text('Señas registradas'),
+              title: const Text('Seña recibida'),
               trailing: Text(_money(finance.deposits)),
             ),
             ListTile(
               title: Text(
                 balance != null && balance < 0
                     ? 'Cobrado por encima del presupuesto'
-                    : 'Saldo restante',
+                    : 'Saldo pendiente',
               ),
               trailing: Text(
                 balance == null ? 'Por calcular' : _money(balance.abs()),
@@ -1123,6 +1222,12 @@ class _OrderDetailsState extends State<_OrderDetails> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialog) => AlertDialog(
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: Text(paid ? 'Confirmar cobro' : 'Desmarcar cobrado'),
         content: Text(
           paid
@@ -1153,10 +1258,37 @@ class _OrderDetailsState extends State<_OrderDetails> {
     });
   }
 
+  Future<void> _openOrderDevice() async {
+    try {
+      final db = await _openWorkshop();
+      final rows = await db.rawQuery(
+        'SELECT d.* FROM devices d JOIN work_orders o ON o.device_id = d.id '
+        'WHERE o.code = ?',
+        [_code],
+      );
+      if (!mounted || rows.isEmpty) return;
+      await _showWorkshopDevice(context, rows.single);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo abrir la ficha del equipo.'),
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _showHistory() async {
     final code = widget.order['code'] as String;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => _StatusHistoryPage(code: code)),
+      MaterialPageRoute<void>(
+        builder: (_) => _StatusHistoryPage(
+          code: code,
+          model: widget.order['model'] as String,
+          status: _status,
+        ),
+      ),
     );
   }
 
@@ -1234,13 +1366,6 @@ class _OrderDetailsState extends State<_OrderDetails> {
           body: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              Text(
-                order['model'] as String,
-                style: theme.textTheme.headlineSmall,
-              ),
-              const SizedBox(height: 12),
-              Text(order['code'] as String),
-              const SizedBox(height: 12),
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
@@ -1257,31 +1382,19 @@ class _OrderDetailsState extends State<_OrderDetails> {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              _OrderReceptionCard(code: order['code'] as String),
-              const SizedBox(height: 16),
-              _WorkshopPdfButton(code: order['code'] as String),
-              _OrderPhotos(code: order['code'] as String),
-              const SizedBox(height: 16),
-              Text('Datos de la reparación', style: theme.textTheme.titleLarge),
-              const SizedBox(height: 8),
               Card(
                 child: Column(
                   children: [
                     ListTile(
-                      // La fila Cliente abre la ficha.
+                      title: const Text('Equipo'),
+                      subtitle: Text(order['model'] as String),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: _saving ? null : _openOrderDevice,
+                    ),
+                    ListTile(
                       title: const Text('Cliente'),
-                      subtitle: Text(
-                        order['customer'] as String,
-                        style: TextStyle(
-                          color: order['customer_id'] is int
-                              ? theme.colorScheme.primary
-                              : null,
-                        ),
-                      ),
-                      trailing: order['customer_id'] is int
-                          ? const Icon(Icons.chevron_right)
-                          : null,
+                      subtitle: Text(order['customer'] as String),
+                      trailing: const Icon(Icons.chevron_right),
                       onTap: _saving || order['customer_id'] is! int
                           ? null
                           : () => Navigator.of(context).push<void>(
@@ -1291,39 +1404,52 @@ class _OrderDetailsState extends State<_OrderDetails> {
                               ),
                             ),
                     ),
+                    _CustomerPhoneTile(order: order),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 20),
+              Text('Reparación', style: theme.textTheme.titleLarge),
+              Card(
+                child: Column(
+                  children: [
                     ListTile(
                       title: const Text('Problema informado'),
                       subtitle: Text(_reportedIssue),
-                      trailing: IconButton(
-                        tooltip: 'Editar problema informado',
-                        onPressed: _saving ? null : _editReportedIssue,
-                        icon: const Icon(Icons.edit_outlined),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Acciones del problema informado',
+                        enabled: !_saving,
+                        onSelected: (_) => _editReportedIssue(),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'edit', child: Text('Editar')),
+                        ],
                       ),
                     ),
-                    _CustomerPhoneTile(order: order),
                     _OrderFrpMethodTile(code: _code),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              _observationCard(work: true),
               _observationCard(),
-              // Bloques del detalle de la orden
               const SizedBox(height: 20),
-              Text('Presupuesto', style: theme.textTheme.titleLarge),
-              const SizedBox(height: 8),
+              Text('Presupuesto y cobro', style: theme.textTheme.titleLarge),
               Card(
                 child: _OrderBudgetLink(
                   code: _code,
                   onReturn: () => setState(() => _finance = _loadFinance()),
                 ),
               ),
-              const SizedBox(height: 20),
-              Text('Resumen económico', style: theme.textTheme.titleLarge),
               _financeCard(),
               const SizedBox(height: 20),
               Text('Entrega', style: theme.textTheme.titleLarge),
-              const SizedBox(height: 8),
               Card(child: _PickupDateTile(order: order)),
+              const SizedBox(height: 20),
+              Text('Recepción', style: theme.textTheme.titleLarge),
+              _OrderReceptionCard(code: _code),
+              const SizedBox(height: 20),
+              Text('Fotos y documentos', style: theme.textTheme.titleLarge),
+              _WorkshopPdfButton(code: _code),
+              _OrderPhotos(code: _code),
             ],
           ),
         ),
@@ -1397,9 +1523,15 @@ Future<List<Map<String, Object?>>> _readStatusHistory(String code) async {
 }
 
 class _StatusHistoryPage extends StatefulWidget {
-  const _StatusHistoryPage({required this.code});
+  const _StatusHistoryPage({
+    required this.code,
+    required this.model,
+    required this.status,
+  });
 
   final String code;
+  final String model;
+  final String status;
 
   @override
   State<_StatusHistoryPage> createState() => _StatusHistoryPageState();
@@ -1411,7 +1543,11 @@ class _StatusHistoryPageState extends State<_StatusHistoryPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Historial · ${widget.code}')),
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: Text('Historial · ${widget.code}'),
+        showSectionMenu: false,
+      ),
       body: FutureBuilder<List<Map<String, Object?>>>(
         future: _history,
         builder: (context, snapshot) {
@@ -1422,18 +1558,35 @@ class _StatusHistoryPageState extends State<_StatusHistoryPage> {
           if (entries == null) {
             return const Center(child: CircularProgressIndicator());
           }
-          if (entries.isEmpty) {
-            return const Center(
-              child: Text('Todavía no hay cambios registrados.'),
-            );
-          }
-
           final localizations = MaterialLocalizations.of(context);
           return ListView.builder(
             padding: const EdgeInsets.all(16),
-            itemCount: entries.length,
+            itemCount: entries.isEmpty ? 2 : entries.length + 1,
             itemBuilder: (context, index) {
-              final entry = entries[index];
+              if (index == 0) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.phone_android),
+                      title: Text(widget.model),
+                      subtitle: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: _OrderStatusBadge(status: widget.status),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }
+              if (entries.isEmpty) {
+                return const ListTile(
+                  title: Text('Todavía no hay cambios registrados.'),
+                );
+              }
+              final entry = entries[index - 1];
               final date = DateTime.fromMillisecondsSinceEpoch(
                 entry['changed_at'] as int,
               );
@@ -1443,13 +1596,51 @@ class _StatusHistoryPageState extends State<_StatusHistoryPage> {
                 alwaysUse24HourFormat: true,
               );
 
-              return Card(
-                child: ListTile(
-                  leading: const Icon(Icons.history),
-                  title: Text(
-                    '${entry['previous_status']} → ${entry['new_status']}',
-                  ),
-                  subtitle: Text('$day · $time'),
+              final accent = index == 1
+                  ? const Color(0xff10d9ef)
+                  : const Color(0xffdba8ed);
+              return IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SizedBox(
+                      width: 28,
+                      child: Stack(
+                        alignment: Alignment.topCenter,
+                        children: [
+                          if (entries.length > 1)
+                            Positioned(
+                              top: index == 1 ? 22 : 0,
+                              bottom: index == entries.length ? null : 0,
+                              height: index == entries.length ? 22 : null,
+                              child: const VerticalDivider(width: 1),
+                            ),
+                          Positioned(
+                            top: 15,
+                            child: Icon(
+                              Icons.radio_button_checked,
+                              size: 14,
+                              color: accent,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Card(
+                          child: ListTile(
+                            leading: Icon(Icons.swap_horiz, color: accent),
+                            title: Text(
+                              '${entry['previous_status']} → ${entry['new_status']}',
+                            ),
+                            subtitle: Text('$day · $time'),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               );
             },
@@ -1500,7 +1691,11 @@ class _WorkshopAgendaPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Agenda')),
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: const Text('Agenda'),
+        showSectionMenu: false,
+      ),
       body: const WorkshopInicio(agendaOnly: true),
     );
   }
@@ -1692,15 +1887,66 @@ class _CustomerPhoneTileState extends State<_CustomerPhoneTile> {
     }
   }
 
+  Future<void> _openWhatsApp(String phone) async {
+    try {
+      final opened = await launchUrl(
+        Uri.https('wa.me', '/${phone.substring(1)}'),
+        mode: LaunchMode.externalApplication,
+      );
+      if (opened) {
+        return;
+      }
+    } catch (_) {
+      // Se informa el fallo debajo.
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('No se pudo abrir WhatsApp.')));
+  }
+
   @override
   Widget build(BuildContext context) {
+    final phone = (_phone ?? '').replaceAll(RegExp(r'[\s().-]'), '');
+    final canWhatsApp = RegExp(r'^\+[1-9][0-9]{5,14}$').hasMatch(phone);
+
     return PopScope(
       canPop: !_saving,
       child: ListTile(
         title: const Text('Teléfono del cliente'),
         subtitle: Text(_phone ?? 'Sin teléfono registrado'),
-        trailing: const Icon(Icons.edit_outlined),
-        onTap: _saving ? null : _edit,
+        trailing: PopupMenuButton<String>(
+          tooltip: 'Acciones del teléfono',
+          enabled: !_saving,
+          onSelected: (action) async {
+            switch (action) {
+              case 'whatsapp':
+                await _openWhatsApp(phone);
+              case 'call':
+                await _openDialer(context, phone);
+              case 'edit':
+                await _edit();
+            }
+          },
+          itemBuilder: (_) => [
+            if (canWhatsApp)
+              const PopupMenuItem(value: 'whatsapp', child: Text('WhatsApp')),
+            if (phone.isNotEmpty)
+              const PopupMenuItem(value: 'call', child: Text('Llamar')),
+            const PopupMenuItem(value: 'edit', child: Text('Editar número')),
+          ],
+        ),
+        onTap: _saving
+            ? null
+            : phone.isEmpty
+            ? _edit
+            : () async {
+                await Clipboard.setData(ClipboardData(text: _phone!.trim()));
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Teléfono copiado.')),
+                );
+              },
       ),
     );
   }
@@ -1789,7 +2035,8 @@ class _CustomerDetailsState extends State<_CustomerDetails> {
     final heading = Theme.of(context).textTheme.titleLarge;
 
     return Scaffold(
-      appBar: AppBar(
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
         title: Text(_customerName),
         actions: [
           IconButton(
@@ -2008,6 +2255,12 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
       canPop: !_saving,
       child: AlertDialog(
         scrollable: true,
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: const Text('Nuevo cliente'),
         content: Form(
           key: _form,
@@ -2018,7 +2271,10 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
                 controller: _name,
                 enabled: !_saving,
                 textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(labelText: 'Nombre'),
+                decoration: const InputDecoration(
+                  labelText: 'Nombre',
+                  border: OutlineInputBorder(),
+                ),
                 validator: (value) =>
                     (value ?? '').trim().isEmpty ? 'Ingresá el nombre.' : null,
               ),
@@ -2028,6 +2284,7 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
                   labelText: 'Teléfono opcional',
+                  border: OutlineInputBorder(),
                 ),
                 validator: (_) {
                   final phone = _normalizedPhone;
@@ -2041,7 +2298,10 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
               TextFormField(
                 enabled: !_saving,
                 keyboardType: TextInputType.streetAddress,
-                decoration: const InputDecoration(labelText: 'Dirección'),
+                decoration: const InputDecoration(
+                  labelText: 'Dirección',
+                  border: OutlineInputBorder(),
+                ),
                 onChanged: (value) => _address = value.trim(),
               ),
               if (_error != null) Text(_error!),
@@ -2286,6 +2546,10 @@ Future<void> _deleteWorkshopRecord(
         ),
         FilledButton(
           onPressed: () => Navigator.of(dialogContext).pop(true),
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+          ),
           child: const Text('Eliminar'),
         ),
       ],
@@ -2381,6 +2645,8 @@ Future<int> _reserveOrderNumber(Transaction txn) async {
   return rows.single['last_number'] as int;
 }
 
+String _budgetReference(Object? id) => 'PR-${id.toString().padLeft(6, '0')}';
+
 Future<void> _createBudgets(Database db) async {
   await db.execute('''
     CREATE TABLE budgets (
@@ -2427,6 +2693,7 @@ Future<List<Map<String, Object?>>> _readBudgets(String? orderCode) async {
   return db.rawQuery(
     '''
     SELECT b.id, o.code, TRIM(COALESCE(d.brand || ' ', '') || d.model) AS model, c.name AS customer,
+           b.validity_days, b.warranty, b.notes,
            COALESCE(SUM(i.amount_cents), 0) AS total_cents
     FROM budgets b
     JOIN work_orders o ON o.id = b.order_id
@@ -2502,7 +2769,12 @@ class _WorkshopBudgetsPageState extends State<WorkshopBudgetsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Presupuestos')),
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: const Text('Presupuestos'),
+        showSectionMenu: false,
+      ),
+
       floatingActionButton: widget.orderCode == null
           ? null
           : FloatingActionButton.extended(
@@ -2547,32 +2819,109 @@ class _WorkshopBudgetsPageState extends State<WorkshopBudgetsPage> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              for (final budget in budgets)
-                Card(
-                  child: ListTile(
-                    title: Text('${budget['code']} · ${budget['model']}'),
-                    subtitle: Text(budget['customer'] as String),
-                    trailing: Text(_budgetAmount(budget['total_cents'] as int)),
-                    onTap: () async {
-                      await Navigator.of(context).push<void>(
-                        MaterialPageRoute(
-                          builder: (_) => _BudgetDetails(
-                            budget: budget,
-                            showOrderLink: widget.orderCode == null,
-                          ),
-                        ),
-                      );
-                      if (mounted) {
-                        setState(
-                          () => _budgets = _readBudgets(widget.orderCode),
-                        );
-                      }
-                    },
-                  ),
-                ),
+              for (final (index, budget) in budgets.indexed)
+                _budgetCard(budget, index),
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _budgetCard(Map<String, Object?> budget, int index) {
+    final theme = Theme.of(context);
+    final accent = index.isEven
+        ? const Color(0xff10d9ef)
+        : const Color(0xffedaafb);
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(12),
+      side: const BorderSide(color: Color(0xff454b55)),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: const Color(0xff1e2229),
+        shape: shape,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () async {
+            await Navigator.of(context).push<void>(
+              MaterialPageRoute(
+                builder: (_) => _BudgetDetails(
+                  budget: budget,
+                  showOrderLink: widget.orderCode == null,
+                ),
+              ),
+            );
+            if (mounted) {
+              setState(() => _budgets = _readBudgets(widget.orderCode));
+            }
+          },
+          child: Stack(
+            children: [
+              PositionedDirectional(
+                start: 0,
+                top: 0,
+                bottom: 0,
+                width: 6,
+                child: Ink(color: accent),
+              ),
+              Padding(
+                padding: const EdgeInsetsDirectional.fromSTEB(16, 14, 12, 14),
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Row(
+                    children: [
+                      const Icon(Icons.assignment_outlined, size: 23),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              budget['customer'] as String,
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              budget['model'] as String,
+                              style: theme.textTheme.bodySmall,
+                            ),
+                            Text(
+                              '${_budgetReference(budget['id'])} · ${budget['code']}',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        constraints: BoxConstraints(
+                          maxWidth: constraints.maxWidth * .40,
+                        ),
+                        decoration: const BoxDecoration(
+                          border: Border(
+                            left: BorderSide(color: Color(0xff555d68)),
+                          ),
+                        ),
+                        padding: const EdgeInsetsDirectional.only(start: 8),
+                        child: Text(
+                          _budgetAmount(budget['total_cents'] as int),
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -2638,7 +2987,11 @@ class _BudgetDetailsState extends State<_BudgetDetails> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Presupuesto · ${widget.budget['code']}')),
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: Text('Presupuesto · ${widget.budget['code']}'),
+        showSectionMenu: false,
+      ),
       body: FutureBuilder(
         future: _items,
         builder: (context, snapshot) {
@@ -2657,27 +3010,73 @@ class _BudgetDetailsState extends State<_BudgetDetails> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              for (final item in items)
-                ListTile(
-                  title: Text(item['description'] as String),
-                  subtitle: Text('Cantidad: ${item['quantity']}'),
-                  trailing: Text(_budgetAmount(item['amount_cents'] as int)),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.person_outline),
+                  title: Text(widget.budget['customer'] as String),
+                  subtitle: Text(
+                    '${widget.budget['model']}\n'
+                    '${_budgetReference(widget.budget['id'])} · ${widget.budget['code']}',
+                  ),
                 ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                color: const Color(0xff263943),
+                child: ListTile(
+                  title: Text(
+                    'Total cotizado',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  trailing: Text(
+                    _budgetAmount(total),
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Conceptos', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              if (items.isEmpty)
+                const Card(child: ListTile(title: Text('Sin conceptos'))),
+              for (final item in items)
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.receipt_long_outlined),
+                    title: Text(item['description'] as String),
+                    subtitle: Text(
+                      '${item['quantity']} × '
+                      '${_budgetAmount((item['amount_cents'] as int) ~/ (item['quantity'] as int))}',
+                    ),
+                    trailing: Text(_budgetAmount(item['amount_cents'] as int)),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              if (widget.budget['validity_days'] != null)
+                ListTile(
+                  title: const Text('Validez'),
+                  trailing: Text('${widget.budget['validity_days']} días'),
+                ),
+              if (widget.budget['warranty'] case final String warranty)
+                ListTile(
+                  title: const Text('Garantía'),
+                  subtitle: Text(warranty),
+                ),
+              if (widget.budget['notes'] case final String notes)
+                ListTile(
+                  title: const Text('Observaciones'),
+                  subtitle: Text(notes),
+                ),
+              _WorkshopPdfButton(
+                code: widget.budget['code'] as String,
+                budget: true,
+              ),
               if (widget.showOrderLink)
                 OutlinedButton.icon(
                   onPressed: _openingOrder ? null : _openRelatedOrder,
                   icon: const Icon(Icons.receipt_long_outlined),
                   label: const Text('Ir a la orden'),
                 ),
-              _WorkshopPdfButton(
-                code: widget.budget['code'] as String,
-                budget: true,
-              ),
-              const Divider(),
-              ListTile(
-                title: const Text('Total'),
-                trailing: Text(_budgetAmount(total)),
-              ),
             ],
           );
         },
@@ -2934,6 +3333,63 @@ class _CatalogPageState extends State<_CatalogPage> {
     );
   }
 
+  bool _deletingSupplier = false;
+
+  Future<void> _deleteSupplier(Map<String, Object?> supplier) async {
+    if (_deletingSupplier) return;
+    setState(() => _deletingSupplier = true);
+    final route = ModalRoute.of(context);
+
+    try {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Eliminar proveedor'),
+          content: Text(
+            'Se eliminarán la ficha de ${supplier['name']} y todos sus datos. '
+            'Sus repuestos quedarán en Stock sin proveedor asociado. '
+            'Esta acción no se puede deshacer.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Eliminar'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || confirmed != true || route?.isCurrent != true) return;
+
+      final db = await _openWorkshop();
+      await db.delete(
+        'suppliers',
+        where: 'id = ?',
+        whereArgs: [supplier['id']],
+      );
+
+      if (!mounted) return;
+      if (route?.isCurrent == true) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Proveedor eliminado.')));
+        Navigator.of(context).pop();
+      } else {
+        setState(() => _rows = _load());
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo eliminar el proveedor.')),
+      );
+    } finally {
+      if (mounted) setState(() => _deletingSupplier = false);
+    }
+  }
+
   Future<void> _openSupplier(int id) async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
@@ -2957,7 +3413,9 @@ class _CatalogPageState extends State<_CatalogPage> {
     // Encabezado compartido de proveedores.
     final page = Scaffold(
       bottomNavigationBar: widget.suppliers ? widget.supplierNavigation : null,
-      backgroundColor: widget.suppliers ? Colors.transparent : null,
+      backgroundColor: widget.suppliers
+          ? Colors.transparent
+          : const Color(0xff11151d),
       appBar: widget.suppliers
           ? OrdenSocHeader(
               title: Text(title),
@@ -2983,15 +3441,18 @@ class _CatalogPageState extends State<_CatalogPage> {
                   ),
               ],
             )
-          : AppBar(
+          : OrdenSocHeader(
               title: Text(title),
+              showSectionMenu: false,
               actions: [
-                if (!widget.suppliers)
-                  IconButton(
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: IconButton(
                     tooltip: 'Nuevo repuesto',
                     icon: const Icon(Icons.add),
                     onPressed: () => _editStockItem(),
                   ),
+                ),
               ],
             ),
       body: FutureBuilder<List<Map<String, Object?>>>(
@@ -3004,14 +3465,24 @@ class _CatalogPageState extends State<_CatalogPage> {
             return Center(
               child: OutlinedButton(
                 onPressed: () => setState(() => _rows = _load()),
-                child: const Text('No se pudo cargar. Reintentar'),
+                child: Text(
+                  widget.suppliers
+                      ? 'No se pudieron cargar los proveedores. Reintentar'
+                      : 'No se pudo cargar Stock. Reintentar',
+                ),
               ),
             );
           }
 
           final rows = snapshot.requireData;
           if (rows.isEmpty && (!widget.suppliers || isDetail)) {
-            return const Center(child: Text('No hay registros disponibles.'));
+            return Center(
+              child: Text(
+                isDetail
+                    ? 'Proveedor no disponible.'
+                    : 'Todavía no hay repuestos registrados.',
+              ),
+            );
           }
 
           if (isDetail) {
@@ -3068,6 +3539,17 @@ class _CatalogPageState extends State<_CatalogPage> {
                       subtitle: Text(row['model'] as String),
                       trailing: Text('${row['quantity']} unidades'),
                     ),
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  onPressed: _deletingSupplier
+                      ? null
+                      : () => _deleteSupplier(supplier),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.error,
+                  ),
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Eliminar proveedor'),
+                ),
               ],
             );
           }
@@ -3291,6 +3773,10 @@ class _OrderPhotosState extends State<_OrderPhotos> {
           ),
           FilledButton(
             onPressed: () => Navigator.of(dialog).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialog).colorScheme.error,
+              foregroundColor: Theme.of(dialog).colorScheme.onError,
+            ),
             child: const Text('Quitar'),
           ),
         ],
@@ -3309,11 +3795,60 @@ class _OrderPhotosState extends State<_OrderPhotos> {
     }, 'No se pudo quitar la foto.');
   }
 
-  void _view(Uint8List bytes) {
+  void _view(List<Map<String, Object?>> photos, int initialIndex) {
+    var index = initialIndex;
     showDialog<void>(
       context: context,
-      builder: (_) =>
-          Dialog(child: InteractiveViewer(child: Image.memory(bytes))),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => Dialog(
+          backgroundColor: const Color(0xff22272f),
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * .65,
+            child: Column(
+              children: [
+                Expanded(
+                  child: InteractiveViewer(
+                    key: ValueKey(index),
+                    child: Center(
+                      child: Image.memory(
+                        photos[index]['image'] as Uint8List,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) =>
+                            const Text('No se pudo mostrar la foto.'),
+                      ),
+                    ),
+                  ),
+                ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      tooltip: 'Foto anterior',
+                      onPressed: index == 0
+                          ? null
+                          : () => setDialogState(() => index--),
+                      icon: const Icon(Icons.chevron_left),
+                    ),
+                    Text('${index + 1} / ${photos.length}'),
+                    IconButton(
+                      tooltip: 'Foto siguiente',
+                      onPressed: index == photos.length - 1
+                          ? null
+                          : () => setDialogState(() => index++),
+                      icon: const Icon(Icons.chevron_right),
+                    ),
+                    IconButton(
+                      tooltip: 'Cerrar fotos',
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -3363,13 +3898,13 @@ class _OrderPhotosState extends State<_OrderPhotos> {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final photo in photos)
+                  for (final (index, photo) in photos.indexed)
                     Card(
                       clipBehavior: Clip.antiAlias,
                       child: Column(
                         children: [
                           InkWell(
-                            onTap: () => _view(photo['image'] as Uint8List),
+                            onTap: () => _view(photos, index),
                             child: Image.memory(
                               photo['image'] as Uint8List,
                               width: 112,
@@ -3739,15 +4274,22 @@ class _BudgetEditorState extends State<_BudgetEditor> {
             children: [
               TextFormField(
                 initialValue: description,
-                decoration: const InputDecoration(labelText: 'Concepto'),
+                decoration: const InputDecoration(
+                  labelText: 'Concepto',
+                  prefixIcon: Icon(Icons.receipt_long_outlined),
+                ),
                 onChanged: (value) => description = value,
                 validator: (value) => (value ?? '').trim().isEmpty
                     ? 'Ingresá un concepto.'
                     : null,
               ),
+              const SizedBox(height: 12),
               TextFormField(
                 initialValue: quantity,
-                decoration: const InputDecoration(labelText: 'Cantidad'),
+                decoration: const InputDecoration(
+                  labelText: 'Cantidad',
+                  prefixIcon: Icon(Icons.numbers),
+                ),
                 keyboardType: TextInputType.number,
                 onChanged: (value) => quantity = value,
                 validator: (value) {
@@ -3757,10 +4299,12 @@ class _BudgetEditorState extends State<_BudgetEditor> {
                       : null;
                 },
               ),
+              const SizedBox(height: 12),
               TextFormField(
                 initialValue: price,
                 decoration: const InputDecoration(
                   labelText: 'Precio unitario en pesos',
+                  prefixIcon: Icon(Icons.payments_outlined),
                   hintText: 'Ejemplo: 1250,50',
                 ),
                 keyboardType: const TextInputType.numberWithOptions(
@@ -3938,38 +4482,84 @@ class _BudgetEditorState extends State<_BudgetEditor> {
     return PopScope(
       canPop: !_saving,
       child: Scaffold(
-        appBar: AppBar(title: Text('Presupuesto · ${widget.code}')),
+        backgroundColor: const Color(0xff11151d),
+        appBar: OrdenSocHeader(
+          title: const Text('Editar presupuesto'),
+          showSectionMenu: false,
+        ),
+        bottomNavigationBar: _loading || _loadFailed
+            ? null
+            : SafeArea(
+                minimum: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Card(
+                      color: const Color(0xff263943),
+                      child: ListTile(
+                        title: const Text('Total cotizado'),
+                        trailing: Text(
+                          _budgetAmount(total),
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: _saving || _lines.isEmpty ? null : _save,
+                      child: Text(
+                        _saving ? 'Guardando…' : 'Guardar presupuesto',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
             : ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  if (_error != null) Text(_error!),
-                  for (var i = 0; i < _lines.length; i++)
-                    ListTile(
-                      title: Text(_lines[i].description),
-                      subtitle: Text(
-                        '${_lines[i].quantity} × ${_budgetAmount(_lines[i].unitCents)}',
+                  if (_error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
                       ),
-                      onTap: _saving ? null : () => _editLine(i),
-                      trailing: IconButton(
-                        tooltip: 'Quitar concepto',
-                        onPressed: _saving
-                            ? null
-                            : () => setState(() => _lines.removeAt(i)),
-                        icon: const Icon(Icons.delete_outline),
+                    ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Conceptos'),
+                    subtitle: Text('Orden ${widget.code}'),
+                  ),
+                  for (var i = 0; i < _lines.length; i++)
+                    Card(
+                      child: ListTile(
+                        title: Text(_lines[i].description),
+                        subtitle: Text(
+                          '${_lines[i].quantity} × ${_budgetAmount(_lines[i].unitCents)}\n'
+                          'Subtotal: ${_budgetAmount(_lines[i].quantity * _lines[i].unitCents)}',
+                        ),
+                        onTap: _saving ? null : () => _editLine(i),
+                        trailing: IconButton(
+                          tooltip: 'Quitar concepto',
+                          onPressed: _saving
+                              ? null
+                              : () => setState(() => _lines.removeAt(i)),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
                       ),
                     ),
                   if (!_loadFailed) ...[
-                    TextButton.icon(
+                    OutlinedButton.icon(
                       onPressed: _saving ? null : () => _editLine(),
                       icon: const Icon(Icons.add),
                       label: const Text('Agregar concepto'),
                     ),
-                    ListTile(
-                      title: const Text('Total'),
-                      trailing: Text(_budgetAmount(total)),
-                    ),
+                    const SizedBox(height: 16),
                     TextFormField(
                       initialValue: _validity,
                       enabled: !_saving,
@@ -3995,12 +4585,7 @@ class _BudgetEditorState extends State<_BudgetEditor> {
                       ),
                       onChanged: (value) => _notes = value,
                     ),
-                    FilledButton(
-                      onPressed: _saving || _lines.isEmpty ? null : _save,
-                      child: Text(
-                        _saving ? 'Guardando…' : 'Guardar presupuesto',
-                      ),
-                    ),
+                    const SizedBox(height: 12),
                   ],
                 ],
               ),
@@ -4020,55 +4605,97 @@ String _deviceLabel(Map<String, Object?> device) {
   return '$brand ${device['model']}'.trim();
 }
 
-extension on _CustomerDetailsState {
-  Future<void> _showDevice(Map<String, Object?> device) async {
-    final fichaFrp = _readDeviceFrp(device['id'] as int);
-    final edit = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        scrollable: true,
-        title: const Text('Ficha del equipo'),
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Marca: ${device['brand'] ?? 'Sin registrar'}'),
-            Text('Modelo: ${device['model']}'),
-            Text('Color: ${device['color'] ?? 'Sin registrar'}'),
-            Text(
-              'IMEI / Número de serie: '
-              '${device['device_identifier'] ?? 'Sin registrar'}',
-            ),
-            FutureBuilder<Map<String, Object?>?>(
-              future: fichaFrp,
-              builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return const Padding(
-                    padding: EdgeInsets.only(top: 12),
-                    child: Text('No se pudo leer la información FRP.'),
-                  );
-                }
-
-                final ficha = snapshot.data;
-                return ficha == null
-                    ? const SizedBox.shrink()
-                    : _DeviceFrpDetails(ficha: ficha);
-              },
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cerrar'),
+Future<bool?> _showWorkshopDevice(
+  BuildContext context,
+  Map<String, Object?> device, {
+  bool canEdit = false,
+}) async {
+  final fichaFrp = _readDeviceFrp(device['id'] as int);
+  return showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      scrollable: true,
+      backgroundColor: const Color(0xff22272f),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: Color(0xff454b55)),
+      ),
+      title: const Text('Ficha del equipo'),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.phone_android),
+            title: Text(_deviceLabel(device)),
           ),
+          Text('Marca: ${device['brand'] ?? 'Sin registrar'}'),
+          Text('Modelo: ${device['model']}'),
+          Text('Color: ${device['color'] ?? 'Sin registrar'}'),
+          Builder(
+            builder: (tileContext) {
+              final identifier =
+                  (device['device_identifier'] as String?)?.trim() ?? '';
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('IMEI / Número de serie'),
+                subtitle: Text(
+                  identifier.isEmpty ? 'Sin registrar' : identifier,
+                ),
+                onTap: identifier.isEmpty
+                    ? null
+                    : () async {
+                        await Clipboard.setData(
+                          ClipboardData(text: identifier),
+                        );
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Identificador copiado.'),
+                          ),
+                        );
+                      },
+              );
+            },
+          ),
+          FutureBuilder<Map<String, Object?>?>(
+            future: fichaFrp,
+            builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text('No se pudo leer la información FRP.'),
+                );
+              }
+
+              final ficha = snapshot.data;
+              return ficha == null
+                  ? const SizedBox.shrink()
+                  : _DeviceFrpDetails(ficha: ficha);
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Cerrar'),
+        ),
+        if (canEdit)
           FilledButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Editar'),
           ),
-        ],
-      ),
-    );
+      ],
+    ),
+  );
+}
+
+extension on _CustomerDetailsState {
+  Future<void> _showDevice(Map<String, Object?> device) async {
+    final edit = await _showWorkshopDevice(context, device, canEdit: true);
     if (mounted && edit == true) await _saveDevice(device);
   }
 
@@ -4094,6 +4721,12 @@ extension on _CustomerDetailsState {
           canPop: !saving,
           child: AlertDialog(
             scrollable: true,
+            backgroundColor: const Color(0xff22272f),
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+              side: const BorderSide(color: Color(0xff454b55)),
+            ),
             title: Text(device == null ? 'Agregar equipo' : 'Editar equipo'),
             content: Form(
               key: form,
@@ -4104,7 +4737,10 @@ extension on _CustomerDetailsState {
                     TextFormField(
                       initialValue: values[field.key],
                       enabled: !saving,
-                      decoration: InputDecoration(labelText: field.value),
+                      decoration: InputDecoration(
+                        labelText: field.value,
+                        border: const OutlineInputBorder(),
+                      ),
                       onChanged: (value) => values[field.key] = value.trim(),
                       validator: (value) {
                         final required =
@@ -4232,6 +4868,12 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       scrollable: true,
+      backgroundColor: const Color(0xff22272f),
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: Color(0xff454b55)),
+      ),
       title: const Text('Recepción de la orden'),
       content: Form(
         key: _form,
@@ -4242,9 +4884,12 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.phone_android),
-              title: Text(widget.deviceLabel),
+              title: Text(
+                widget.deviceLabel,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             TextFormField(
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
@@ -4257,7 +4902,7 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
                   ? 'Ingresá la falla que informó el cliente.'
                   : null,
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             TextFormField(
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
@@ -4265,7 +4910,7 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
               ),
               onChanged: (value) => _accessories = value.trim(),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             TextFormField(
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
@@ -4295,11 +4940,18 @@ class _ReceptionDialogState extends State<_ReceptionDialog> {
         ),
       ),
       actions: [
-        TextButton(
+        OutlinedButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancelar'),
         ),
-        FilledButton(onPressed: _confirm, child: const Text('Crear orden')),
+        FilledButton(
+          onPressed: _confirm,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xff10d9ef),
+            foregroundColor: const Color(0xff11151d),
+          ),
+          child: const Text('Crear orden'),
+        ),
       ],
     );
   }
@@ -4316,6 +4968,117 @@ class _OrderReceptionCard extends StatefulWidget {
 
 class _OrderReceptionCardState extends State<_OrderReceptionCard> {
   late Future<Map<String, Object?>> _reception = _load();
+
+  Future<void> _editField(
+    String field,
+    String label,
+    Object? previous, {
+    bool clear = false,
+  }) async {
+    Object? next;
+    if (field == 'received_at') {
+      final today = DateUtils.dateOnly(DateTime.now());
+      final current = previous is int
+          ? DateTime.fromMillisecondsSinceEpoch(previous)
+          : today;
+      final first = DateTime(current.year < 2000 ? current.year : 2000);
+      final last = current.isAfter(today) ? DateUtils.dateOnly(current) : today;
+      final picked = await showDatePicker(
+        context: context,
+        initialDate: current,
+        firstDate: first,
+        lastDate: last,
+      );
+      if (picked == null) return;
+      next = DateTime(
+        picked.year,
+        picked.month,
+        picked.day,
+        current.hour,
+        current.minute,
+      ).millisecondsSinceEpoch;
+    } else if (!clear) {
+      var value = previous as String? ?? '';
+      next = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(label),
+          content: TextFormField(
+            initialValue: value,
+            maxLines: 3,
+            onChanged: (text) => value = text,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(value.trim()),
+              child: const Text('Guardar'),
+            ),
+          ],
+        ),
+      );
+      if (next == null || next == '') return;
+    } else {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Quitar $label'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Quitar'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    if (!mounted) return;
+    try {
+      final db = await _openWorkshop();
+      final count = await db.update(
+        'work_orders',
+        {field: next},
+        where: 'code = ? AND $field IS ?',
+        whereArgs: [widget.code, previous],
+      );
+      if (!mounted) return;
+      setState(() => _reception = _load());
+      if (count != 1) throw StateError('La recepción cambió');
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No se pudo actualizar la recepción.')),
+        );
+      }
+    }
+  }
+
+  Widget _field(String field, String label, String value, Object? previous) {
+    return ListTile(
+      title: Text(label),
+      subtitle: Text(value),
+      trailing: PopupMenuButton<bool>(
+        tooltip: 'Acciones de $label',
+        onSelected: (clear) => _editField(field, label, previous, clear: clear),
+        itemBuilder: (_) => [
+          PopupMenuItem(
+            value: false,
+            child: Text(previous == null ? 'Agregar' : 'Editar'),
+          ),
+          if (field != 'received_at' && previous != null)
+            const PopupMenuItem(value: true, child: Text('Quitar')),
+        ],
+      ),
+    );
+  }
 
   Future<Map<String, Object?>> _load() async {
     final db = await _openWorkshop();
@@ -4354,21 +5117,18 @@ class _OrderReceptionCardState extends State<_OrderReceptionCard> {
 
           return Column(
             children: [
-              ListTile(
-                title: const Text('Fecha de ingreso'),
-                subtitle: Text(date),
+              _field('received_at', 'Fecha de ingreso', date, timestamp),
+              _field(
+                'received_accessories',
+                'Accesorios recibidos',
+                data['received_accessories'] as String? ?? 'Sin registrar',
+                data['received_accessories'],
               ),
-              ListTile(
-                title: const Text('Accesorios recibidos'),
-                subtitle: Text(
-                  data['received_accessories'] as String? ?? 'Sin registrar',
-                ),
-              ),
-              ListTile(
-                title: const Text('Observaciones del ingreso'),
-                subtitle: Text(
-                  data['intake_notes'] as String? ?? 'Sin registrar',
-                ),
+              _field(
+                'intake_notes',
+                'Observaciones del ingreso',
+                data['intake_notes'] as String? ?? 'Sin registrar',
+                data['intake_notes'],
               ),
             ],
           );
@@ -4827,6 +5587,12 @@ class _StockItemEditorState extends State<_StockItemEditor> {
           final suppliers = snapshot.data;
           return AlertDialog(
             scrollable: true,
+            backgroundColor: const Color(0xff22272f),
+            surfaceTintColor: Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(18),
+              side: const BorderSide(color: Color(0xff454b55)),
+            ),
             title: Text(
               widget.item == null ? 'Nuevo repuesto' : 'Editar repuesto',
             ),
@@ -4979,6 +5745,12 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         scrollable: true,
+        backgroundColor: const Color(0xff22272f),
+        surfaceTintColor: Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: Color(0xff454b55)),
+        ),
         title: Text(incoming ? 'Registrar entrada' : 'Registrar salida'),
         content: Form(
           key: form,
@@ -5077,7 +5849,11 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
     return PopScope(
       canPop: !_saving,
       child: Scaffold(
-        appBar: AppBar(title: const Text('Movimientos de stock')),
+        backgroundColor: const Color(0xff11151d),
+        appBar: OrdenSocHeader(
+          title: const Text('Movimientos de stock'),
+          showSectionMenu: false,
+        ),
         body: FutureBuilder(
           future: _data,
           builder: (context, snapshot) {
@@ -5097,10 +5873,14 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                ListTile(
-                  title: Text(widget.item['name'] as String),
-                  subtitle: Text('Saldo: ${data.balance} unidades'),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.inventory_2_outlined),
+                    title: Text(widget.item['name'] as String),
+                    subtitle: Text('Saldo: ${data.balance} unidades'),
+                  ),
                 ),
+                const SizedBox(height: 12),
                 Wrap(
                   spacing: 12,
                   children: [
@@ -5118,18 +5898,20 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
                 if (data.history.isEmpty)
                   const ListTile(title: Text('Todavía no hay movimientos.')),
                 for (final movement in data.history)
-                  ListTile(
-                    title: Text(movement['reason'] as String),
-                    subtitle: Text(
-                      MaterialLocalizations.of(context).formatShortDate(
-                        DateTime.fromMillisecondsSinceEpoch(
-                          movement['recorded_at'] as int,
+                  Card(
+                    child: ListTile(
+                      title: Text(movement['reason'] as String),
+                      subtitle: Text(
+                        MaterialLocalizations.of(context).formatShortDate(
+                          DateTime.fromMillisecondsSinceEpoch(
+                            movement['recorded_at'] as int,
+                          ),
                         ),
                       ),
-                    ),
-                    trailing: Text(
-                      '${(movement['delta'] as int) > 0 ? '+' : ''}'
-                      '${movement['delta']} u.',
+                      trailing: Text(
+                        '${(movement['delta'] as int) > 0 ? '+' : ''}'
+                        '${movement['delta']} u.',
+                      ),
                     ),
                   ),
               ],
@@ -5317,6 +6099,9 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
           ? ''
           : ' · Adjuntada el ${_displayDate(DateTime.fromMillisecondsSinceEpoch(timestamp))}';
 
+      final documentReference = widget.budget
+          ? "PR-${order['budget_id'].toString().padLeft(6, '0')}"
+          : widget.code;
       final document = pw.Document();
       document.addPage(
         pw.MultiPage(
@@ -5346,7 +6131,7 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
           footer: (page) => pw.Align(
             alignment: pw.Alignment.centerRight,
             child: pw.Text(
-              'Página ${page.pageNumber} de ${page.pagesCount}',
+              '$documentReference · Página ${page.pageNumber} de ${page.pagesCount}',
               style: const pw.TextStyle(fontSize: 9),
             ),
           ),
@@ -5357,11 +6142,7 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
               style: pw.TextStyle(fontSize: 19, fontWeight: pw.FontWeight.bold),
             ),
             pw.SizedBox(height: 8),
-            if (widget.budget)
-              field(
-                'Presupuesto',
-                "PR-${order['budget_id'].toString().padLeft(6, '0')}",
-              ),
+            if (widget.budget) field('Presupuesto', documentReference),
             field(widget.budget ? 'Orden asociada' : 'Orden', order['code']),
             field('Fecha de emisión', _displayDate(DateTime.now())),
             heading('Datos del cliente'),
@@ -5418,7 +6199,7 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
                 decoration: const pw.BoxDecoration(color: budgetTint),
                 child: economicRow(
                   'Total del presupuesto',
-                  _money(total!),
+                  _money(finance.quoted ?? 0),
                   highlight: true,
                 ),
               ),
@@ -5483,24 +6264,40 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
             ),
             if (photos.isNotEmpty) ...[
               pw.NewPage(),
-              heading('Registro fotográfico del equipo'),
-              for (var index = 0; index < photos.length; index++)
+              heading('Registro fotográfico · ${widget.code}'),
+              for (var index = 0; index < photos.length; index += 2)
                 pw.Padding(
-                  padding: const pw.EdgeInsets.only(bottom: 14),
-                  child: pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  padding: const pw.EdgeInsets.only(bottom: 12),
+                  child: pw.Row(
+                    mainAxisAlignment: photos.length == 1
+                        ? pw.MainAxisAlignment.center
+                        : pw.MainAxisAlignment.start,
                     children: [
-                      pw.Text(
-                        'Foto ${index + 1}'
-                        '${attachmentDate(photos[index]['attached_at'] as int?)}',
-                      ),
-                      pw.SizedBox(height: 5),
-                      pw.Image(
-                        pw.MemoryImage(photos[index]['image'] as Uint8List),
-                        width: 420,
-                        height: 230,
-                        fit: pw.BoxFit.contain,
-                      ),
+                      for (var column = 0; column < 2; column++)
+                        if (index + column < photos.length)
+                          pw.Container(
+                            width: photos.length == 1 ? 420 : 230,
+                            margin: const pw.EdgeInsets.only(right: 8),
+                            child: pw.Column(
+                              children: [
+                                pw.Image(
+                                  pw.MemoryImage(
+                                    photos[index + column]['image']
+                                        as Uint8List,
+                                  ),
+                                  width: photos.length == 1 ? 420 : 230,
+                                  height: photos.length == 1 ? 230 : 145,
+                                  fit: pw.BoxFit.contain,
+                                ),
+                                pw.SizedBox(height: 5),
+                                pw.Text(
+                                  'Foto ${index + column + 1}'
+                                  '${attachmentDate(photos[index + column]['attached_at'] as int?)}',
+                                  textAlign: pw.TextAlign.center,
+                                ),
+                              ],
+                            ),
+                          ),
                     ],
                   ),
                 ),
@@ -5514,7 +6311,7 @@ class _WorkshopPdfButtonState extends State<_WorkshopPdfButton> {
       final prefix = widget.budget ? 'presupuesto' : 'orden';
       await Printing.sharePdf(
         bytes: bytes,
-        filename: '$prefix-${widget.code}.pdf',
+        filename: '$prefix-$documentReference.pdf',
       );
     } catch (_) {
       if (mounted) {
@@ -5694,3 +6491,5 @@ class _DeviceFrpDetailsState extends State<_DeviceFrpDetails> {
     );
   }
 }
+
+// v370: cierre de copias y exportacion

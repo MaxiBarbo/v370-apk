@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'orden_soc.dart';
 import 'v370_binario_samsung.dart';
 import 'v370_busqueda_compilacion.dart';
 import 'workshop_sample.dart'
@@ -450,26 +451,47 @@ class _InformacionFrpPageState extends State<InformacionFrpPage> {
         : _modelosSamsung[revision.variante];
     final tema = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Información FRP'),
-        actions: [
-          IconButton(
-            tooltip: 'Agregar teléfono',
-            onPressed: !_hayCompilacion || _vinculando
-                ? null
-                : _agregarTelefono,
+    Widget dato(String etiqueta, String? valor, {String? detalle}) {
+      final texto = valor?.trim();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(etiqueta, style: tema.textTheme.labelMedium),
+          const SizedBox(height: 2),
+          Text(
+            texto == null || texto.isEmpty ? 'Sin verificar' : texto,
+            style: tema.textTheme.bodyMedium,
+          ),
+          if (detalle != null) Text(detalle, style: tema.textTheme.bodySmall),
+        ],
+      );
+    }
 
-            icon: const Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Icon(Icons.smartphone),
-                Positioned(
-                  top: -3,
-                  right: -5,
-                  child: Icon(Icons.add, size: 12),
-                ),
-              ],
+    return Scaffold(
+      backgroundColor: const Color(0xff11151d),
+      appBar: OrdenSocHeader(
+        title: const Text('Información FRP'),
+        showSectionMenu: false,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 4),
+            child: IconButton(
+              tooltip: 'Agregar teléfono',
+              onPressed: !_hayCompilacion || _vinculando
+                  ? null
+                  : _agregarTelefono,
+
+              icon: const Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Icon(Icons.smartphone),
+                  Positioned(
+                    top: -3,
+                    right: -5,
+                    child: Icon(Icons.add, size: 12),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -521,72 +543,73 @@ class _InformacionFrpPageState extends State<InformacionFrpPage> {
                   ),
                 ],
                 const SizedBox(height: 12),
-                TextField(
-                  controller: _marca,
-                  readOnly: true,
-                  showCursor: false,
-                  decoration: const InputDecoration(
-                    labelText: 'Marca',
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    hintText: 'Sin verificar',
-                    isDense: true,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _modelo,
-                  readOnly: true,
-                  showCursor: false,
-                  decoration: InputDecoration(
-                    labelText: 'Modelo',
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    hintText: 'Sin verificar',
-                    isDense: true,
-                    helperText: nombreComercial,
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 8),
-                InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Procesador (SoC)',
-                    isDense: true,
-                  ),
-                  child: Text(
-                    _datosCompilacion.procesadorSoc ?? 'Sin verificar',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _android,
-                  readOnly: true,
-                  showCursor: false,
-                  decoration: const InputDecoration(
-                    labelText: 'Versión de Android',
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    hintText: 'Sin verificar',
-                    isDense: true,
-                  ),
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                ),
-                const SizedBox(height: 12),
                 Card(
                   margin: EdgeInsets.zero,
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.memory,
-                      color: tema.colorScheme.primary,
-                    ),
-                    dense: true,
-                    title: const Text('Binario'),
-                    subtitle: Text(
-                      binario,
-                      style: tema.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                  color: const Color(0xff22272f),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: const BorderSide(color: Color(0xff454b55)),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'Datos del equipo',
+                          style: tema.textTheme.titleMedium,
+                        ),
+                        const Divider(),
+                        IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: dato('Marca', _marca.text)),
+                              const VerticalDivider(width: 20),
+                              Expanded(
+                                child: dato(
+                                  'Modelo',
+                                  _modelo.text,
+                                  detalle: nombreComercial,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Divider(),
+                        IntrinsicHeight(
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: dato(
+                                  'Procesador (SoC)',
+                                  _datosCompilacion.procesadorSoc,
+                                ),
+                              ),
+                              const VerticalDivider(width: 20),
+                              Expanded(
+                                child: dato(
+                                  'Versión de Android',
+                                  _android.text,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Divider(),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.memory,
+                              size: 18,
+                              color: tema.colorScheme.primary,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(child: dato('Binario', binario)),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
