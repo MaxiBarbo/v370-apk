@@ -13,4 +13,4 @@ fi
 
 echo 'Deteniendo el servidor ADB...'
 "$ADB" kill-server || exit 1
-echo 'Apagado de v370 completado.'
+echo 'Listo Max... Apagado de v370 completo.'

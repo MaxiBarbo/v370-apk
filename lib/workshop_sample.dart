@@ -14,6 +14,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'v370_customer_uid.dart';
 import 'orden_soc.dart';
 
 part 'workshop_finance.dart';
@@ -21,6 +22,17 @@ part 'workshop_frp.dart';
 part 'workshop_inicio.dart';
 part 'workshop_backup.dart';
 part 'workshop_export.dart';
+
+String _normalizarEstadoOrden(String estado) {
+  switch (estado) {
+    case 'DiagnÃ³stico':
+      return 'Diagnóstico';
+    case 'ReparaciÃ³n':
+      return 'Reparación';
+    default:
+      return estado;
+  }
+}
 
 Future<void> _addFollowUpNotes(Database db) async {
   await db.execute('ALTER TABLE work_orders ADD COLUMN follow_up_notes TEXT');
@@ -43,7 +55,7 @@ Future<Database> _openWorkshop() async {
   final directory = await getDatabasesPath();
   return openDatabase(
     '$directory/v370_workshop.db',
-    version: 23,
+    version: 24,
     onUpgrade: (db, oldVersion, newVersion) async {
       if (oldVersion < 19) {
         await _createDeviceFrp(db);
@@ -71,6 +83,14 @@ Future<Database> _openWorkshop() async {
       if (oldVersion < 18) await _addContactDetails(db);
       if (oldVersion < 21) await _addFrpWorkflow(db);
       if (oldVersion < 22) await _addBackupIds(db);
+      if (oldVersion < 24) {
+        await db.execute(
+          'ALTER TABLE customers ADD COLUMN sync_uid TEXT',
+        );
+        await db.execute(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_sync_uid ON customers(sync_uid)',
+        );
+      }
       if (oldVersion < 23) {
         await db.execute(
           'ALTER TABLE work_orders ADD COLUMN work_performed TEXT',
@@ -83,7 +103,8 @@ Future<Database> _openWorkshop() async {
       await db.execute('''
         CREATE TABLE customers (
           id INTEGER PRIMARY KEY,
-          name TEXT NOT NULL
+          name TEXT NOT NULL,
+          sync_uid TEXT UNIQUE
         )
       ''');
       await db.execute('''
@@ -223,7 +244,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(builder: (_) => _CustomerDetails(customer: customer)),
     );
-    if (mounted) setState(() => _orders = _loadRows());
+    if (mounted) setState(() { _orders = _loadRows(); });
   }
 
   Future<void> _addCustomer() async {
@@ -231,7 +252,11 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
       context: context,
       builder: (_) => const _NewCustomerDialog(),
     );
-    if (mounted && saved != null) setState(() => _orders = _loadRows());
+    if (mounted && saved != null) {
+      setState(() {
+        _orders = _loadRows();
+      });
+    }
   }
 
   @override
@@ -252,7 +277,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
 
     // Encabezado SoC del listado de ordenes.
     final page = Scaffold(
-      backgroundColor: isCustomers ? null : Colors.transparent,
+      backgroundColor: Colors.transparent,
       appBar: !isCustomers
           ? OrdenSocHeader(
               title: const Text('Órdenes'),
@@ -269,10 +294,12 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
                 ),
               ],
             )
-          : AppBar(
+          : OrdenSocHeader(
+              // Estilo de Cartera del taller.
               title: Text(widget.title),
-              actions: [
-                if (isCustomers)
+              showBackButton: true,
+              showSectionMenu: false,
+              headerActions: [
                   IconButton(
                     tooltip: 'Nuevo cliente',
                     onPressed: _addCustomer,
@@ -286,7 +313,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
           if (snapshot.hasError) {
             return Center(
               child: OutlinedButton(
-                onPressed: () => setState(() => _orders = _loadRows()),
+                onPressed: () => setState(() { _orders = _loadRows(); }),
                 child: const Text('Error al leer SQLite. Reintentar'),
               ),
             );
@@ -299,7 +326,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
           final visibleOrders = orders.where((row) {
             if (!isCustomers &&
                 _statusFilter != null &&
-                row['status'] != _statusFilter) {
+                _normalizarEstadoOrden(row['status'] as String) != _statusFilter) {
               return false;
             }
             final fields = isCustomers
@@ -325,7 +352,11 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
             controller: _searchController,
             decoration: InputDecoration(
               prefixIcon: const Icon(Icons.search),
-              border: isCustomers ? null : const OutlineInputBorder(),
+
+              border: const OutlineInputBorder(),
+              filled: isCustomers ? true : null,
+              fillColor: isCustomers ? const Color(0xff20242b) : null,
+
               isDense: !isCustomers,
               labelText: isCustomers
                   ? 'Buscar por nombre o teléfono'
@@ -414,36 +445,72 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
                     ),
                   ),
                 ),
-              for (final order in visibleOrders)
+
+              for (final (index, order) in visibleOrders.indexed)
                 Card(
-                  child: ListTile(
-                    leading: Icon(
-                      isCustomers ? Icons.person_outline : Icons.phone_android,
-                    ),
-                    title: Text(
-                      (isCustomers ? order['customer'] : order['model'])
-                          as String,
-                    ),
-                    subtitle: Text(
-                      isCustomers
-                          ? (order['customer_phone'] as String? ??
-                                'Sin teléfono registrado')
-                          : '${order['code']} · ${order['customer']}',
-                    ),
-                    trailing: isCustomers
-                        ? const Icon(Icons.chevron_right)
-                        : _OrderStatusBadge(status: order['status'] as String),
-                    onTap: () async {
-                      await Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => isCustomers
-                              ? _CustomerDetails(customer: order)
-                              : _OrderDetails(order: order),
+                  color: isCustomers ? const Color(0xff20242b) : null,
+                  elevation: isCustomers ? 0 : null,
+                  margin: isCustomers ? const EdgeInsets.only(bottom: 8) : null,
+                  clipBehavior: isCustomers ? Clip.antiAlias : null,
+                  child: Stack(
+                    children: [
+                      if (isCustomers)
+                        Positioned(
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          width: 5,
+                          // Acento alternado de Cartera.
+                          child: ColoredBox(
+                            color: index.isEven
+                                ? const Color(0xff09ccea)
+                                : const Color(0xffdd99f7),
+                          ),
                         ),
-                      );
-                      if (!mounted) return;
-                      setState(() => _orders = _loadRows());
-                    },
+                      ListTile(
+                        leading: Icon(
+                          isCustomers
+                              ? Icons.person_outline
+                              : Icons.phone_android,
+                        ),
+                        title: Text(
+                          (isCustomers ? order['customer'] : order['model'])
+                              as String,
+                        ),
+                        subtitle: Text(
+                          isCustomers
+                              ? (order['customer_phone'] as String? ??
+                                    'Sin teléfono registrado')
+                              : '${order['code']} · ${order['customer']}',
+                        ),
+                        trailing: isCustomers
+                            ? IconButton(
+                                tooltip: 'Eliminar cliente',
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _deleteWorkshopRecord(
+                                  context, _DeleteTarget.customer,
+                                  order['customer_id']!,
+                                  onDeleted: () {
+                                    if (mounted) setState(() { _orders = _loadRows(); });
+                                  },
+                                ),
+                              )
+                            : _OrderStatusBadge(
+                                status: _normalizarEstadoOrden(order['status'] as String),
+                              ),
+                        onTap: () async {
+                          await Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => isCustomers
+                                  ? _CustomerDetails(customer: order)
+                                  : _OrderDetails(order: order),
+                            ),
+                          );
+                          if (!mounted) return;
+                          setState(() { _orders = _loadRows(); });
+                        },
+                      ),
+                    ],
                   ),
                 ),
             ],
@@ -451,7 +518,7 @@ class _WorkshopRecordsState extends State<_WorkshopRecords> {
         },
       ),
     );
-    return isCustomers ? page : OrdenSocBackdrop(child: page);
+    return OrdenSocBackdrop(child: page);
   }
 }
 
@@ -754,7 +821,9 @@ class _OrderDetailsState extends State<_OrderDetails> {
     'Retirado',
   ];
 
-  late String _status = widget.order['status'] as String;
+
+  late String _status =
+      _normalizarEstadoOrden(widget.order['status'] as String);
   late String _reportedIssue = widget.order['issue'] as String;
   bool _saving = false;
 
@@ -1126,7 +1195,7 @@ class _OrderDetailsState extends State<_OrderDetails> {
         return OutlinedButton(
           onPressed: _saving
               ? null
-              : () => setState(() => _finance = _loadFinance()),
+              : () => setState(() { _finance = _loadFinance(); }),
           child: const Text('No se pudo leer el resumen. Reintentar'),
         );
       }
@@ -1436,7 +1505,7 @@ class _OrderDetailsState extends State<_OrderDetails> {
               Card(
                 child: _OrderBudgetLink(
                   code: _code,
-                  onReturn: () => setState(() => _finance = _loadFinance()),
+                  onReturn: () => setState(() { _finance = _loadFinance(); }),
                 ),
               ),
               _financeCard(),
@@ -1490,7 +1559,7 @@ Future<void> _saveOrderStatus(
 
     final order = orders.single;
     final previousStatus = order['status'] as String;
-    if (previousStatus == nextStatus) return;
+    if (_normalizarEstadoOrden(previousStatus) == nextStatus) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
     await txn.update(
@@ -1868,6 +1937,18 @@ class _CustomerPhoneTileState extends State<_CustomerPhoneTile> {
     setState(() => _saving = true);
     try {
       final db = await _openWorkshop();
+      if (phone != null) {
+        final others = await db.query('customers',
+            columns: ['id', 'phone'],
+            where: 'id != ?', whereArgs: [widget.order['customer_id']]);
+        final digits = phone.replaceAll(RegExp(r'[^0-9]'), '');
+        if (others.any((row) =>
+            (row['phone'] ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '') == digits)) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Ese teléfono ya pertenece a otro cliente. Revisá la ficha existente.')));
+          return;
+        }
+      }
       final updated = await db.update(
         'customers',
         {'phone': phone},
@@ -2202,6 +2283,7 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
   final _form = GlobalKey<FormState>();
   final _name = TextEditingController();
   final _phone = TextEditingController();
+  final _emailInput = TextEditingController();
   String _address = '';
   bool _saving = false;
   String? _error;
@@ -2213,7 +2295,69 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
   void dispose() {
     _name.dispose();
     _phone.dispose();
+    _emailInput.dispose();
     super.dispose();
+  }
+
+  String _duplicatePhone(Object? value) =>
+      (value ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '');
+
+  Future<bool> _showExistingCustomers(Database db, String phone, String email) async {
+    final rows = await db.query('customers',
+        columns: ['id', 'name', 'phone', 'email'],
+        orderBy: 'name COLLATE NOCASE');
+    final normalizedPhone = _duplicatePhone(phone);
+    final normalizedEmail = email.trim().toLowerCase();
+    final matches = <({Map<String, Object?> row, String reason})>[];
+    for (final row in rows) {
+      final samePhone = normalizedPhone.isNotEmpty &&
+          _duplicatePhone(row['phone']) == normalizedPhone;
+      final sameEmail = normalizedEmail.isNotEmpty &&
+          (row['email'] ?? '').toString().trim().toLowerCase() == normalizedEmail;
+      if (samePhone || sameEmail) {
+        matches.add((row: row, reason: samePhone && sameEmail
+            ? 'Coinciden teléfono y correo'
+            : samePhone ? 'Coincide el teléfono' : 'Coincide el correo'));
+      }
+    }
+    if (matches.isEmpty) return false;
+    if (!mounted) return true;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        scrollable: true,
+        title: const Text('Cliente ya registrado'),
+        content: SizedBox(
+          width: 420,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('El teléfono o correo ya pertenece a otra ficha. '
+                'No se creará un duplicado. Abrí la ficha para revisarla o actualizarla.'),
+            const SizedBox(height: 12),
+            for (final match in matches.take(10))
+              ListTile(
+                title: Text((match.row['name'] ?? '').toString()),
+                subtitle: Text('${match.reason}\n${match.row['phone'] ?? ''}'),
+                isThreeLine: true,
+                trailing: const Icon(Icons.open_in_new),
+                onTap: () async {
+                  await Navigator.of(dialogContext).push<void>(
+                    MaterialPageRoute<void>(builder: (_) => _CustomerDetails(customer: {
+                      'customer_id': match.row['id'],
+                      'customer': match.row['name'],
+                      'customer_phone': match.row['phone'],
+                    })),
+                  );
+                },
+              ),
+          ]),
+        ),
+        actions: [TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Volver al formulario'),
+        )],
+      ),
+    );
+    return true;
   }
 
   Future<void> _save() async {
@@ -2227,10 +2371,18 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
 
     try {
       final db = await _openWorkshop();
+      final duplicate = await _showExistingCustomers(db, phone, _emailInput.text);
+      if (!mounted) return;
+      if (duplicate) {
+        setState(() => _saving = false);
+        return;
+      }
       final customer = <String, Object?>{
         'name': name,
         'phone': phone.isEmpty ? null : phone,
+        'email': _emailInput.text.trim().isEmpty ? null : _emailInput.text.trim().toLowerCase(),
         'address': _address.isEmpty ? null : _address,
+        'sync_uid': V370CustomerUid.newUid(),
       };
       final id = await db.insert('customers', customer);
       if (!mounted) return;
@@ -2293,6 +2445,24 @@ class _NewCustomerDialogState extends State<_NewCustomerDialog> {
                     return null;
                   }
                   return 'Ingresá un teléfono válido.';
+                },
+              ),
+              TextFormField(
+                controller: _emailInput,
+                enabled: !_saving,
+                keyboardType: TextInputType.emailAddress,
+                autocorrect: false,
+                decoration: const InputDecoration(
+                  labelText: 'Correo electrónico opcional',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  final email = (value ?? '').trim();
+                  if (email.isEmpty ||
+                      RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
+                    return null;
+                  }
+                  return 'Ingresá un correo válido.';
                 },
               ),
               TextFormField(
@@ -2460,7 +2630,7 @@ class _OrderCustomerPickerState extends State<_OrderCustomerPicker> {
               return Center(
                 child: OutlinedButton(
                   onPressed: () =>
-                      setState(() => _customers = _readCustomers()),
+                      setState(() { _customers = _readCustomers(); }),
                   child: const Text('No se pudo cargar Clientes. Reintentar'),
                 ),
               );
@@ -2602,6 +2772,8 @@ Future<void> _deleteWorkshopRecord(
       return;
     }
 
+    if (target == _DeleteTarget.customer) {
+    }
     if (onDeleted != null) {
       onDeleted();
     } else if (ModalRoute.of(context)?.isCurrent == true) {
@@ -2787,7 +2959,7 @@ class _WorkshopBudgetsPageState extends State<WorkshopBudgetsPage> {
                   ),
                 );
                 if (mounted && saved == true) {
-                  setState(() => _budgets = _readBudgets(widget.orderCode));
+                  setState(() { _budgets = _readBudgets(widget.orderCode); });
                 }
               },
             ),
@@ -2801,7 +2973,7 @@ class _WorkshopBudgetsPageState extends State<WorkshopBudgetsPage> {
             return Center(
               child: OutlinedButton(
                 onPressed: () =>
-                    setState(() => _budgets = _readBudgets(widget.orderCode)),
+                    setState(() { _budgets = _readBudgets(widget.orderCode); }),
                 child: const Text(
                   'No se pudieron leer los presupuestos. Reintentar',
                 ),
@@ -2855,7 +3027,7 @@ class _WorkshopBudgetsPageState extends State<WorkshopBudgetsPage> {
               ),
             );
             if (mounted) {
-              setState(() => _budgets = _readBudgets(widget.orderCode));
+              setState(() { _budgets = _readBudgets(widget.orderCode); });
             }
           },
           child: Stack(
@@ -2962,7 +3134,7 @@ class _BudgetDetailsState extends State<_BudgetDetails> {
       await Navigator.of(context).push<void>(
         MaterialPageRoute(builder: (_) => _OrderDetails(order: order)),
       );
-      if (mounted) setState(() => _items = _loadItems());
+      if (mounted) setState(() { _items = _loadItems(); });
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3208,7 +3380,7 @@ class _CatalogPageState extends State<_CatalogPage> {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(builder: (_) => _StockMovementsPage(item: item)),
     );
-    if (mounted) setState(() => _rows = _load());
+    if (mounted) setState(() { _rows = _load(); });
   }
 
   Future<void> _editStockItem([Map<String, Object?>? item]) async {
@@ -3217,7 +3389,7 @@ class _CatalogPageState extends State<_CatalogPage> {
       barrierDismissible: false,
       builder: (_) => _StockItemEditor(item: item),
     );
-    if (mounted && saved == true) setState(() => _rows = _load());
+    if (mounted && saved == true) setState(() { _rows = _load(); });
   }
 
   Future<void> _editSupplier([Map<String, Object?>? supplier]) async {
@@ -3230,7 +3402,7 @@ class _CatalogPageState extends State<_CatalogPage> {
       ),
     );
 
-    if (mounted && saved == true) setState(() => _rows = _load());
+    if (mounted && saved == true) setState(() { _rows = _load(); });
   }
 
   Widget _supplierAccentCard(Widget child, Color accent) {
@@ -3378,7 +3550,7 @@ class _CatalogPageState extends State<_CatalogPage> {
         ).showSnackBar(const SnackBar(content: Text('Proveedor eliminado.')));
         Navigator.of(context).pop();
       } else {
-        setState(() => _rows = _load());
+        setState(() { _rows = _load(); });
       }
     } catch (_) {
       if (!mounted) return;
@@ -3400,7 +3572,7 @@ class _CatalogPageState extends State<_CatalogPage> {
         ),
       ),
     );
-    if (mounted) setState(() => _rows = _load());
+    if (mounted) setState(() { _rows = _load(); });
   }
 
   @override
@@ -3464,7 +3636,7 @@ class _CatalogPageState extends State<_CatalogPage> {
           if (snapshot.hasError) {
             return Center(
               child: OutlinedButton(
-                onPressed: () => setState(() => _rows = _load()),
+                onPressed: () => setState(() { _rows = _load(); }),
                 child: Text(
                   widget.suppliers
                       ? 'No se pudieron cargar los proveedores. Reintentar'
@@ -3718,7 +3890,7 @@ class _OrderPhotosState extends State<_OrderPhotos> {
     setState(() => _busy = true);
     try {
       await action();
-      if (mounted) setState(() => _photos = _load());
+      if (mounted) setState(() { _photos = _load(); });
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -3884,7 +4056,7 @@ class _OrderPhotosState extends State<_OrderPhotos> {
                 return TextButton(
                   onPressed: _busy
                       ? null
-                      : () => setState(() => _photos = _load()),
+                      : () => setState(() { _photos = _load(); }),
                   child: const Text(
                     'No se pudieron leer las fotos. Reintentar',
                   ),
@@ -4014,6 +4186,16 @@ class _CustomerEmailTileState extends State<_CustomerEmailTile> {
     setState(() => _saving = true);
     try {
       final db = await _openWorkshop();
+      if (value != null) {
+        final others = await db.query('customers',
+            columns: ['id'], where: 'id != ? AND lower(trim(email)) = ?',
+            whereArgs: [widget.customerId, value.toLowerCase()]);
+        if (others.isNotEmpty) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Ese correo ya pertenece a otro cliente. Revisá la ficha existente.')));
+          return;
+        }
+      }
       final updated = await db.update(
         'customers',
         {'email': value},
@@ -4021,7 +4203,7 @@ class _CustomerEmailTileState extends State<_CustomerEmailTile> {
         whereArgs: [widget.customerId],
       );
       if (updated != 1) throw StateError('Cliente no encontrado.');
-      if (mounted) setState(() => _email = Future.value(value));
+      if (mounted) setState(() { _email = Future.value(value); });
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -4054,7 +4236,7 @@ class _CustomerEmailTileState extends State<_CustomerEmailTile> {
             onTap: !loaded || _saving
                 ? null
                 : snapshot.hasError
-                ? () => setState(() => _email = _load())
+                ? () => setState(() { _email = _load(); })
                 : () => _edit(snapshot.data),
           );
         },
@@ -4133,7 +4315,7 @@ class _CustomerAddressTileState extends State<_CustomerAddressTile> {
         whereArgs: [widget.customerId],
       );
       if (updated != 1) throw StateError('Cliente no encontrado.');
-      if (mounted) setState(() => _address = Future.value(value));
+      if (mounted) setState(() { _address = Future.value(value); });
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -4166,7 +4348,7 @@ class _CustomerAddressTileState extends State<_CustomerAddressTile> {
             onTap: !loaded || _saving
                 ? null
                 : snapshot.hasError
-                ? () => setState(() => _address = _load())
+                ? () => setState(() { _address = _load(); })
                 : () => _edit(snapshot.data),
           );
         },
@@ -5050,7 +5232,7 @@ class _OrderReceptionCardState extends State<_OrderReceptionCard> {
         whereArgs: [widget.code, previous],
       );
       if (!mounted) return;
-      setState(() => _reception = _load());
+      setState(() { _reception = _load(); });
       if (count != 1) throw StateError('La recepción cambió');
     } catch (_) {
       if (mounted) {
@@ -5101,7 +5283,7 @@ class _OrderReceptionCardState extends State<_OrderReceptionCard> {
             return ListTile(
               title: const Text('No se pudo leer la recepción.'),
               subtitle: const Text('Tocá para reintentar.'),
-              onTap: () => setState(() => _reception = _load()),
+              onTap: () => setState(() { _reception = _load(); }),
             );
           }
 
@@ -5625,7 +5807,7 @@ class _StockItemEditorState extends State<_StockItemEditor> {
                   if (snapshot.hasError)
                     TextButton(
                       onPressed: () =>
-                          setState(() => _suppliers = _loadSuppliers()),
+                          setState(() { _suppliers = _loadSuppliers(); }),
                       child: const Text(
                         'No se pudieron leer los proveedores. Reintentar',
                       ),
@@ -5825,7 +6007,7 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
 
       if (!mounted) return;
       if (saved) {
-        setState(() => _data = _load());
+        setState(() { _data = _load(); });
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -5863,7 +6045,7 @@ class _StockMovementsPageState extends State<_StockMovementsPage> {
             if (snapshot.hasError) {
               return Center(
                 child: OutlinedButton(
-                  onPressed: () => setState(() => _data = _load()),
+                  onPressed: () => setState(() { _data = _load(); }),
                   child: const Text('No se pudo cargar el stock. Reintentar'),
                 ),
               );
@@ -6493,3 +6675,4 @@ class _DeviceFrpDetailsState extends State<_DeviceFrpDetails> {
 }
 
 // v370: cierre de copias y exportacion
+

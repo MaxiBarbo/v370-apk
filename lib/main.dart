@@ -6,7 +6,10 @@ import 'orden_soc.dart';
 import 'workshop_sample.dart';
 import 'v370_informacion_frp.dart';
 
-void main() => runApp(const V370App());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const V370App());
+}
 
 class V370App extends StatefulWidget {
   const V370App({super.key});

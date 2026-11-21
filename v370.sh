@@ -15,7 +15,7 @@ if [[ "${1:-}" == 'cerrar' ]]; then
 fi
 
 if ! "$ADB" devices | grep -q "^${DEVICE}[[:space:]]"; then
-  echo 'Abriendo el Pixel 8...'
+  echo 'Hola Max...Abriendo el Pixel 8...'
   "$SDK/emulator/emulator.exe" -avd Pixel_8 -port 5554 -no-snapshot-load \
     > "$LOG" 2>&1 &
 fi
